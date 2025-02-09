@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { db, auth } from '../firebase/config';
 import { signInAnonymously } from 'firebase/auth';
+import { checkSurveyCompletion } from '../utils/assessment-tracking';
 import {
   Box,
   Button,
@@ -78,26 +79,47 @@ const Login = () => {
   const handleLogin = async (e) => {
     e.preventDefault();
     setError('');
-
+  
     if (!loginId) {
       setError('Please enter a login ID');
       return;
     }
-
+  
     if (!validateLoginId(loginId)) {
       setError('Invalid login ID format');
       return;
     }
-
+  
     try {
       setLoading(true);
-
+  
       if (loginId === 'ADMIN') {
-        sessionStorage.setItem('isAdmin', 'true');
-        navigate('/admin');
-        return;
+        try {
+          // First sign in anonymously
+          const userCredential = await signInAnonymously(auth);
+          console.log('Anonymous auth successful for admin:', userCredential.user.uid);
+          
+          // Set session storage for admin
+          sessionStorage.setItem('userLoginId', 'ADMIN');
+          sessionStorage.setItem('isAdmin', 'true');
+          
+          toast({
+            title: 'Admin login successful',
+            status: 'success',
+            duration: 2000,
+          });
+  
+          // Navigate to admin dashboard
+          navigate('/admin');
+          return;
+        } catch (adminError) {
+          console.error('Admin login error:', adminError);
+          setError('Admin authentication failed. Please try again.');
+          return;
+        }
       }
-
+  
+      // For regular users:
       // First check if login ID exists
       const userDoc = await getDoc(doc(db, 'loginIDs', loginId));
       
@@ -105,11 +127,14 @@ const Login = () => {
         setError('Invalid login ID');
         return;
       }
-
-      // Sign in anonymously first
+  
+      // Check if user has completed all surveys
+      const isCompleted = await checkSurveyCompletion(loginId);
+      
+      // Sign in anonymously
       const userCredential = await signInAnonymously(auth);
       console.log('Anonymous auth successful:', userCredential.user.uid);
-
+  
       // Set session data
       sessionStorage.setItem('userLoginId', loginId);
       
@@ -117,16 +142,20 @@ const Login = () => {
       await updateDoc(doc(db, 'loginIDs', loginId), {
         lastLogin: serverTimestamp()
       });
-
+  
       toast({
         title: 'Login successful',
-        description: 'Welcome to the Art Survey',
         status: 'success',
         duration: 2000,
       });
-
-      // Navigate to survey
-      navigate('/survey');
+  
+      // Navigate based on completion status
+      if (isCompleted) {
+        navigate('/completion');
+      } else {
+        navigate('/survey');
+      }
+      
     } catch (error) {
       console.error('Login error:', error);
       setError('Failed to log in. Please try again.');
@@ -134,6 +163,7 @@ const Login = () => {
       setLoading(false);
     }
   };
+
 
   return (
     <Box minH="100vh" bg="gray.50">

@@ -5,7 +5,7 @@ import { doc, getDoc, updateDoc, writeBatch, serverTimestamp } from 'firebase/fi
 import { ref, getDownloadURL } from 'firebase/storage';
 import { db, storage, auth } from '../firebase/config';
 import { onAuthStateChanged } from 'firebase/auth';
-import { trackAssessment, assignImageBatch } from '../utils/assessment-tracking';
+import { trackAssessment, assignImageBatch, checkSurveyCompletion } from '../utils/assessment-tracking';
 import {
   Box,
   Flex,
@@ -24,7 +24,6 @@ import {
 
 const QUALTRICS_SURVEY_URL = "https://georgetown.az1.qualtrics.com/jfe/form/SV_e8oQEoEpj7Lkv5k";
 
-// Helper function to encode URL parameters
 const encodeQualtricsParams = (params) => {
   return Object.entries(params)
     .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
@@ -41,6 +40,8 @@ const Survey = () => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [surveyLoaded, setSurveyLoaded] = useState(false);
   const [lastResponse, setLastResponse] = useState(null);
+  const [canLoadNextForm, setCanLoadNextForm] = useState(true);
+  const [isFormCompleted, setIsFormCompleted] = useState(false);
   
   const navigate = useNavigate();
   const toast = useToast();
@@ -55,30 +56,36 @@ const Survey = () => {
       navigate('/login');
       return;
     }
-
+  
+    // Remove refresh handler - this was causing the logout issue
+    // window.onbeforeunload = () => {
+    //   sessionStorage.removeItem('userLoginId');
+    //   sessionStorage.removeItem('isAdmin');
+    //   auth.signOut();
+    // };
+  
     let authUnsubscribe;
     const initAuth = async () => {
       try {
-        if (auth.currentUser) {
-          console.log('User already authenticated:', auth.currentUser.uid);
-          setIsAuthenticated(true);
-          setInitializing(false);
+        if (!auth.currentUser) {
+          console.log('No user found, redirecting to login');
+          sessionStorage.removeItem('userLoginId');
+          sessionStorage.removeItem('isAdmin');
+          navigate('/login');
           return;
         }
-
-        authUnsubscribe = onAuthStateChanged(auth, async (user) => {
-          console.log('Auth state changed:', user ? 'User signed in' : 'No user');
-          if (user) {
-            console.log('User authenticated:', user.uid);
-            setIsAuthenticated(true);
-          } else {
-            console.log('No user found, redirecting to login');
-            sessionStorage.removeItem('userLoginId');
-            sessionStorage.removeItem('isAdmin');
-            navigate('/login');
-          }
-          setInitializing(false);
-        });
+  
+        // Check completion status
+        const isCompleted = await checkSurveyCompletion(loginId);
+        if (isCompleted) {
+          console.log('User has completed all surveys, redirecting to completion');
+          navigate('/completion');
+          return;
+        }
+  
+        console.log('User authenticated:', auth.currentUser.uid);
+        setIsAuthenticated(true);
+        setInitializing(false);
       } catch (error) {
         console.error('Auth initialization error:', error);
         setError('Failed to initialize authentication');
@@ -86,12 +93,10 @@ const Survey = () => {
         navigate('/login');
       }
     };
-
+  
     initAuth();
     return () => {
-      if (authUnsubscribe) {
-        authUnsubscribe();
-      }
+      if (authUnsubscribe) authUnsubscribe();
     };
   }, [navigate]);
 
@@ -105,52 +110,41 @@ const Survey = () => {
 
       try {
         setLoading(true);
-        console.log('Starting image load for user:', loginId);
-        
         const userRef = doc(db, 'userProgress', loginId);
         const userDoc = await getDoc(userRef);
         let assignedBatch;
         
         if (userDoc.exists() && userDoc.data()?.assignedBatch?.length > 0) {
-          console.log('Found existing batch:', userDoc.data().assignedBatch);
           assignedBatch = userDoc.data().assignedBatch;
         } else {
-          console.log('Getting new batch assignment...');
           assignedBatch = await assignImageBatch(loginId);
-          console.log('New batch assigned:', assignedBatch);
         }
 
-        if (!assignedBatch || assignedBatch.length === 0) {
+        if (!assignedBatch?.length) {
           throw new Error('No image batch assigned');
         }
 
         const verifiedImages = await Promise.all(
           assignedBatch.map(async (imageId) => {
-            const extensions = ['.jpg', '.png'];
-            let imageUrl = null;
-            
-            for (const ext of extensions) {
+            // Try all supported extensions
+            for (const ext of ['.jpg', '.jpeg', '.png']) {
               const imageRef = ref(storage, `artwork-images/${imageId}${ext}`);
               try {
-                imageUrl = await getDownloadURL(imageRef);
-                console.log(`Found image ${imageId} with extension ${ext}`);
-                break;
+                const imageUrl = await getDownloadURL(imageRef);
+                console.log(`Successfully loaded image ${imageId}${ext}`);
+                return {
+                  id: imageId,
+                  imageUrl,
+                  order: parseInt(imageId),
+                  format: ext.substring(1) // Store the format that worked
+                };
               } catch (error) {
-                console.log(`Image ${imageId}${ext} not found, trying next extension...`);
+                console.log(`Could not find image ${imageId}${ext}, trying next format...`);
                 continue;
               }
             }
-
-            if (!imageUrl) {
-              console.warn(`No image found for ID ${imageId} with any extension`);
-              return null;
-            }
-
-            return {
-              id: imageId,
-              imageUrl,
-              order: parseInt(imageId)
-            };
+            console.warn(`Image ${imageId} not found in any supported format`);
+            return null;
           })
         );
 
@@ -169,13 +163,8 @@ const Survey = () => {
 
         setImages(validImages);
         
-        const userProgressDoc = await getDoc(userRef);
-        if (userProgressDoc.exists()) {
-          const progress = userProgressDoc.data().progress || 0;
-          console.log('Setting current index to:', progress);
-          setCurrentIndex(Math.min(progress, validImages.length - 1));
-        }
-
+        const progress = userDoc.exists() ? (userDoc.data().progress || 0) : 0;
+        setCurrentIndex(Math.min(progress, validImages.length - 1));
         setLoading(false);
       } catch (error) {
         console.error('Error loading images:', error);
@@ -189,42 +178,51 @@ const Survey = () => {
     }
   }, [loginId, navigate, isAuthenticated, initializing]);
 
-  // Survey Completion Effect with enhanced message handling
+  // Survey Completion Effect
   useEffect(() => {
     const handleMessage = (event) => {
       if (event.origin !== "https://georgetown.az1.qualtrics.com") return;
       
       try {
         console.log('Message received from Qualtrics:', event.data);
-        const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
         
-        if (data.responseId) {
-          console.log('Qualtrics response ID received:', data.responseId);
-          setLastResponse(data.responseId);
+        if (typeof event.data === 'string' && event.data.includes('QualtricsEOS')) {
+          console.log('Survey completion detected');
+          setFormSubmitted(true);
+          setCanLoadNextForm(false);
+          setIsFormCompleted(true);
+          return;
         }
         
-        if (data.type === 'QualtricsEOS' || (typeof event.data === 'string' && event.data.includes('QualtricsEOS'))) {
-          console.log('Survey completion detected with data:', {
-            loginId,
-            imageId: images[currentIndex]?.id,
-            imageNumber: currentIndex + 1
-          });
-          setFormSubmitted(true);
+        if (typeof event.data === 'object') {
+          const data = event.data;
+          if (data.type === 'QualtricsEOS') {
+            setFormSubmitted(true);
+            setCanLoadNextForm(false);
+            setIsFormCompleted(true);
+            if (data.responseId) {
+              setLastResponse(data.responseId);
+            }
+          }
         }
       } catch (error) {
-        console.error('Error processing Qualtrics message:', error);
+        if (typeof event.data !== 'string' || event.data.startsWith('{')) {
+          console.error('Error processing Qualtrics message:', error);
+        }
       }
     };
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [currentIndex, images, loginId]);
+  }, []);
 
-  // Reset Form Submitted State Effect
+  // Reset states when moving to next image
   useEffect(() => {
     setFormSubmitted(false);
     setSurveyLoaded(false);
     setLastResponse(null);
+    setCanLoadNextForm(true);
+    setIsFormCompleted(false);
   }, [currentIndex]);
 
   const handleNext = async () => {
@@ -239,16 +237,11 @@ const Survey = () => {
     }
 
     try {
-      // Track the assessment with additional metadata
-      await trackAssessment(
-        images[currentIndex].id, 
-        loginId,
-        {
-          responseId: lastResponse,
-          completedAt: new Date().toISOString(),
-          imageNumber: currentIndex + 1
-        }
-      );
+      await trackAssessment(images[currentIndex].id, loginId, {
+        responseId: lastResponse,
+        completedAt: new Date().toISOString(),
+        imageNumber: currentIndex + 1
+      });
       
       const userRef = doc(db, 'userProgress', loginId);
       await updateDoc(userRef, {
@@ -263,11 +256,14 @@ const Survey = () => {
       if (currentIndex >= images.length - 1) {
         navigate('/completion');
       } else {
+        setFormSubmitted(false);
+        setSurveyLoaded(false);
+        setCanLoadNextForm(true);
+        setIsFormCompleted(false);
         setCurrentIndex(prev => prev + 1);
       }
     } catch (error) {
       console.error('Error tracking assessment:', error);
-      setError('Failed to save progress');
       toast({
         title: "Error",
         description: "Failed to save progress. Please try again.",
@@ -297,27 +293,21 @@ const Survey = () => {
     });
   };
 
-  // Function to generate Qualtrics URL with all necessary parameters
   const getQualtricsUrl = () => {
-    if (!images[currentIndex]?.id || !loginId) {
-      console.warn('Missing required parameters for Qualtrics URL');
-      return '';
-    }
+    if (!images[currentIndex]?.id || !loginId) return '';
 
     const params = {
       loginId,
       imageId: images[currentIndex].id,
       imageNumber: currentIndex + 1,
       timestamp: new Date().toISOString(),
-      totalImages: images.length
+      totalImages: images.length,
+      preventAutoAdvance: 'true'
     };
 
     return `${QUALTRICS_SURVEY_URL}?${encodeQualtricsParams(params)}`;
   };
 
-
-
-// Return section of Survey.js
 
   if (loading || initializing) {
     return (
@@ -349,6 +339,7 @@ const Survey = () => {
 
   return (
     <Box minH="100vh" bg="gray.50">
+      {/* Header */}
       <Box position="fixed" top={0} left={0} right={0} bg="white" boxShadow="sm" zIndex={10}>
         <Container maxW="7xl" py={4}>
           <Flex justify="space-between" align="center" mb={2}>
@@ -368,8 +359,10 @@ const Survey = () => {
         </Container>
       </Box>
 
+      {/* Main Content */}
       <Container maxW="7xl" pt="100px" pb="100px">
         <Flex gap={8} direction={{ base: "column", lg: "row" }}>
+          {/* Image Display */}
           <Box flex="2" bg="white" p={6} borderRadius="lg" boxShadow="md">
             <Image
               src={images[currentIndex]?.imageUrl}
@@ -383,32 +376,43 @@ const Survey = () => {
             />
           </Box>
 
+          {/* Survey Form */}
           <Box flex="3" bg="white" borderRadius="lg" boxShadow="md" h="800px" overflow="hidden">
             {!surveyLoaded && (
               <Flex h="full" align="center" justify="center">
                 <Spinner size="xl" />
               </Flex>
             )}
-            <iframe
-              key={`${currentIndex}-${images[currentIndex]?.id}-${loginId}`}
-              src={getQualtricsUrl()}
-              title="Survey Form"
-              width="100%"
-              height="100%"
-              style={{ 
-                display: surveyLoaded ? 'block' : 'none',
-                border: 'none'
-              }}
-              onLoad={() => {
-                console.log('Survey iframe loaded');
-                setSurveyLoaded(true);
-              }}
-              onError={handleSurveyError}
-            />
+            {canLoadNextForm && (
+              <iframe
+                key={`${currentIndex}-${images[currentIndex]?.id}-${loginId}`}
+                src={getQualtricsUrl()}
+                title="Survey Form"
+                width="100%"
+                height="100%"
+                style={{ 
+                  display: surveyLoaded ? 'block' : 'none',
+                  border: 'none'
+                }}
+                onLoad={() => {
+                  console.log('Survey iframe loaded');
+                  setSurveyLoaded(true);
+                }}
+                onError={handleSurveyError}
+              />
+            )}
+            {isFormCompleted && !canLoadNextForm && (
+              <Flex h="full" align="center" justify="center" p={8}>
+                <Text fontSize="lg" color="gray.600" textAlign="center">
+                  Form completed. Please click "Next Image" below to continue.
+                </Text>
+              </Flex>
+            )}
           </Box>
         </Flex>
       </Container>
 
+      {/* Footer */}
       <Box position="fixed" bottom={0} left={0} right={0} bg="white" borderTop="1px" borderColor="gray.200" zIndex={10}>
         <Container maxW="7xl" py={4}>
           <Flex justify="space-between" align="center">

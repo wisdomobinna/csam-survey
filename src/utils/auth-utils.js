@@ -4,9 +4,11 @@ import { auth } from '../firebase/config';
 
 export const initializeAnonymousAuth = () => {
   return new Promise((resolve, reject) => {
-    // First check if we already have a user
+    let timeoutId;
+    
     const unsubscribe = onAuthStateChanged(auth, (user) => {
-      unsubscribe(); // Unsubscribe immediately after first check
+      clearTimeout(timeoutId);
+      unsubscribe();
       
       if (user) {
         resolve(user);
@@ -17,9 +19,25 @@ export const initializeAnonymousAuth = () => {
           .catch(reject);
       }
     });
+
+    // Add timeout to prevent hanging
+    timeoutId = setTimeout(() => {
+      unsubscribe();
+      reject(new Error('Auth initialization timeout'));
+    }, 10000); // 10 second timeout
   });
 };
 
 export const setupAuthListener = (onUserChange) => {
-  return onAuthStateChanged(auth, onUserChange);
+  const unsubscribe = onAuthStateChanged(auth, (user) => {
+    // Add additional validation if needed
+    if (user && !sessionStorage.getItem('userLoginId')) {
+      // Invalid state - user exists but no login ID
+      auth.signOut();
+      return;
+    }
+    onUserChange(user);
+  });
+
+  return unsubscribe;
 };

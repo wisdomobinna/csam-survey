@@ -1,9 +1,8 @@
-// src/pages/AdminDashboard.js
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { collection, getDocs, doc, setDoc, getDoc, writeBatch, serverTimestamp } from 'firebase/firestore';
-import { db } from '../firebase/config';
-import { initializeFirestore, checkInitializationStatus } from '../utils/firebaseSetup';
+import { collection, getDocs, doc, getDoc, writeBatch, serverTimestamp } from 'firebase/firestore';
+import { db, auth } from '../firebase/config';
+import { initializeFirestore } from '../utils/firebaseSetup';
 import { createBalancedAssignments, clearAllAssignments } from '../utils/assignmentSystem';
 import DatabaseStats from '../components/DatabaseStats';
 
@@ -13,17 +12,12 @@ import {
   Progress, Badge, HStack, Input, Button,
   Stat, StatLabel, StatNumber, StatGroup,
   Tabs, TabList, TabPanels, Tab, TabPanel,
-  useToast, Flex, VStack,
-  AlertDialog,
-  AlertDialogBody,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogContent,
-  AlertDialogOverlay,
+  useToast, Flex, VStack, Spinner,
+  AlertDialog, AlertDialogBody, AlertDialogFooter,
+  AlertDialogHeader, AlertDialogContent, AlertDialogOverlay,
 } from '@chakra-ui/react';
 
-function AdminDashboard() {
-  // State Management
+const AdminDashboard = () => {
   const [imageStats, setImageStats] = useState([]);
   const [summary, setSummary] = useState({
     totalAssessments: 0,
@@ -35,6 +29,8 @@ function AdminDashboard() {
   const [isLogoutDialogOpen, setIsLogoutDialogOpen] = useState(false);
   const [isResetDialogOpen, setIsResetDialogOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [initializing, setInitializing] = useState(true);
+  const [isAuthChecking, setIsAuthChecking] = useState(true);
   const [systemStatus, setSystemStatus] = useState({
     imageCount: 0,
     initialized: false
@@ -44,20 +40,8 @@ function AdminDashboard() {
   const navigate = useNavigate();
   const toast = useToast();
 
-  // Initial Load and Admin Check
-  useEffect(() => {
-    const checkAdmin = sessionStorage.getItem('isAdmin');
-    if (!checkAdmin) {
-      window.location.href = '/login';
-      return;
-    }
-    checkSystemStatus();
-    fetchStats();
-    fetchLoginIds();
-  }, []);
-
-  // System Status Functions
-  const checkSystemStatus = async () => {
+  // Memoized functions to fix dependency warnings
+  const checkSystemStatus = useCallback(async () => {
     try {
       const imagesRef = collection(db, 'images');
       const snapshot = await getDocs(imagesRef);
@@ -67,11 +51,16 @@ function AdminDashboard() {
       });
     } catch (error) {
       console.error('Error checking system status:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to check system status',
+        status: 'error',
+        duration: 3000,
+      });
     }
-  };
+  }, [toast]);
 
-  // Image Statistics Functions
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     try {
       const imagesRef = collection(db, 'images');
       const snapshot = await getDocs(imagesRef);
@@ -97,29 +86,18 @@ function AdminDashboard() {
         duration: 3000,
       });
     }
-  };
+  }, [toast]);
 
-  const getProgressColor = (assessments) => {
-    if (assessments >= 12) return "green";
-    if (assessments >= 6) return "yellow";
-    if (assessments > 0) return "orange";
-    return "red";
-  };
-
-  // Login ID Management Functions
-  const fetchLoginIds = async () => {
+  const fetchLoginIds = useCallback(async () => {
     try {
-      // Get all login IDs
       const loginSnapshot = await getDocs(collection(db, 'loginIDs'));
       const progressSnapshot = await getDocs(collection(db, 'userProgress'));
       
-      // Create a map of progress data
       const progressMap = new Map();
       progressSnapshot.docs.forEach(doc => {
         progressMap.set(doc.id, doc.data());
       });
       
-      // Combine login and progress data
       const ids = loginSnapshot.docs.map(doc => {
         const loginData = doc.data();
         const progressData = progressMap.get(doc.id) || {};
@@ -146,7 +124,60 @@ function AdminDashboard() {
         duration: 3000,
       });
     }
-  };
+  }, [toast]);
+
+  useEffect(() => {
+    const checkAuthAndAdmin = async () => {
+      setIsAuthChecking(true);
+      try {
+        console.log('Starting auth check...');
+        
+        const unsubscribe = auth.onAuthStateChanged(async (user) => {
+          console.log('Auth state changed:', {
+            user: user ? 'exists' : 'null',
+            uid: user?.uid,
+            isAnonymous: user?.isAnonymous
+          });
+  
+          const loginId = sessionStorage.getItem('userLoginId');
+          const isAdmin = sessionStorage.getItem('isAdmin');
+  
+          if (!user || loginId !== 'ADMIN' || !isAdmin) {
+            console.log('Invalid admin session, redirecting to login');
+            // Only clear session if we're not in the process of logging in
+            if (!window.location.pathname.includes('/login')) {
+              sessionStorage.clear();
+              navigate('/login');
+            }
+            return;
+          }
+  
+          console.log('Admin authentication successful');
+          setIsAuthChecking(false);
+          setInitializing(false);
+          
+          try {
+            await checkSystemStatus();
+            await fetchStats();
+            await fetchLoginIds();
+            console.log('Dashboard initialization complete');
+          } catch (error) {
+            console.error('Error during dashboard initialization:', error);
+          }
+        });
+  
+        return () => unsubscribe();
+      } catch (error) {
+        console.error('Auth check error:', error);
+        setIsAuthChecking(false);
+        setInitializing(false);
+        navigate('/login');
+      }
+    };
+  
+    checkAuthAndAdmin();
+  }, [navigate, checkSystemStatus, fetchStats, fetchLoginIds]);
+
 
   const handleAddLoginId = async () => {
     if (!loginId.trim()) {
@@ -174,7 +205,6 @@ function AdminDashboard() {
       const batch = writeBatch(db);
       const newLoginId = loginId.trim();
   
-      // Check if login ID already exists
       const loginRef = doc(db, 'loginIDs', newLoginId);
       const loginDoc = await getDoc(loginRef);
       
@@ -190,14 +220,12 @@ function AdminDashboard() {
   
       const timestamp = serverTimestamp();
   
-      // Create login ID document
       batch.set(loginRef, {
         createdAt: timestamp,
         lastLogin: null,
         isActive: true
       });
   
-      // Create progress tracking document
       const progressRef = doc(db, 'userProgress', newLoginId);
       batch.set(progressRef, {
         progress: 0,
@@ -231,13 +259,8 @@ function AdminDashboard() {
   const handleDeleteLoginId = async (loginId) => {
     try {
       const batch = writeBatch(db);
-      
-      // Delete from loginIDs collection
       batch.delete(doc(db, 'loginIDs', loginId));
-      
-      // Delete from userProgress collection
       batch.delete(doc(db, 'userProgress', loginId));
-      
       await batch.commit();
       
       toast({
@@ -259,7 +282,6 @@ function AdminDashboard() {
     }
   };
 
-  // System Control Functions
   const handleInitializeSystem = async () => {
     setIsLoading(true);
     try {
@@ -331,38 +353,33 @@ function AdminDashboard() {
     }
   };
 
-  const handleMigration = async () => {
-    try {
-      setIsLoading(true);
-      toast({
-        title: 'Success',
-        description: 'Database migration completed successfully',
-        status: 'success',
-        duration: 5000,
-      });
-      fetchLoginIds();
-    } catch (error) {
-      toast({
-        title: 'Error',
-        description: 'Migration failed: ' + error.message,
-        status: 'error',
-        duration: 5000,
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
   const handleLogoutConfirm = () => {
     sessionStorage.clear();
-    console.log('Session storage cleared:', Object.keys(sessionStorage));
-    window.location.href = '/login';
+    auth.signOut();
+    navigate('/login');
   };
 
+  const getProgressColor = (assessments) => {
+    if (assessments >= 12) return "green";
+    if (assessments >= 6) return "yellow";
+    if (assessments > 0) return "orange";
+    return "red";
+  };
+
+  if (isAuthChecking || isLoading || initializing) {
+    return (
+      <Flex minH="100vh" align="center" justify="center">
+        <VStack spacing={4}>
+          <Spinner size="xl" />
+          <Text>Loading dashboard...</Text>
+        </VStack>
+      </Flex>
+    );
+  }
 
 
 
-return (
+  return (
     <Container maxW="container.xl" py={6}>
       <Flex justifyContent="space-between" alignItems="center" mb={6}>
         <Heading>Admin Dashboard</Heading>
@@ -455,7 +472,6 @@ return (
                       <Th>Actions</Th>
                     </Tr>
                   </Thead>
-                  {/* Inside your render in AdminDashboard.js, update the table row */}
                   <Tbody>
                     {loginIds.map((item) => (
                       <Tr key={item.id}>
