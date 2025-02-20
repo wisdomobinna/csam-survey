@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { collection, getDocs, doc, getDoc, writeBatch, serverTimestamp } from 'firebase/firestore';
-import { db, auth } from '../firebase/config';
+import { collection, getDocs, doc, getDoc, writeBatch, serverTimestamp, updateDoc } from 'firebase/firestore';
+import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { db, auth, storage } from '../firebase/config';
 import { initializeFirestore } from '../utils/firebaseSetup';
 import { createBalancedAssignments, clearAllAssignments } from '../utils/assignmentSystem';
 import DatabaseStats from '../components/DatabaseStats';
@@ -15,7 +16,9 @@ import {
   useToast, Flex, VStack, Spinner,
   AlertDialog, AlertDialogBody, AlertDialogFooter,
   AlertDialogHeader, AlertDialogContent, AlertDialogOverlay,
+  Textarea, IconButton, useDisclosure,
 } from '@chakra-ui/react';
+import { EditIcon, CheckIcon, CloseIcon } from '@chakra-ui/icons';
 
 const AdminDashboard = () => {
   const [imageStats, setImageStats] = useState([]);
@@ -36,11 +39,127 @@ const AdminDashboard = () => {
     initialized: false
   });
 
+  // Image management states
+  const [editingImageId, setEditingImageId] = useState(null);
+  const [editingPrompt, setEditingPrompt] = useState('');
+  const [imageList, setImageList] = useState([]);
+  const [uploadingImage, setUploadingImage] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+
   const cancelRef = React.useRef();
   const navigate = useNavigate();
   const toast = useToast();
 
-  // Memoized functions to fix dependency warnings
+  // Image upload handler
+  const handleImageUpload = async (imageId, file) => {
+    if (!file || !imageId) return;
+
+    try {
+      setUploadingImage(imageId);
+      setUploadProgress(0);
+
+      // Validate file
+      if (file.size > 5000000) { // 5MB limit
+        throw new Error('File size too large. Please upload an image under 5MB.');
+      }
+
+      if (!file.type.includes('image/')) {
+        throw new Error('Please upload an image file.');
+      }
+
+      // Create storage reference
+      const imageRef = storageRef(storage, `artwork-images/${imageId}.jpg`);
+
+      // Upload file
+      await uploadBytes(imageRef, file);
+      
+      // Get download URL
+      const downloadURL = await getDownloadURL(imageRef);
+
+      // Update Firestore document
+      await updateDoc(doc(db, 'images', imageId), {
+        imageUrl: downloadURL,
+        lastUpdated: serverTimestamp()
+      });
+
+      toast({
+        title: 'Success',
+        description: `Image ${imageId} uploaded successfully`,
+        status: 'success',
+        duration: 3000,
+      });
+
+      // Refresh image list
+      await fetchImageData();
+
+    } catch (error) {
+      console.error('Error uploading image:', error);
+      toast({
+        title: 'Error',
+        description: error.message || 'Failed to upload image',
+        status: 'error',
+        duration: 3000,
+      });
+    } finally {
+      setUploadingImage(null);
+      setUploadProgress(0);
+    }
+  };
+
+  // Fetch image data
+  const fetchImageData = async () => {
+    try {
+      const imagesRef = collection(db, 'images');
+      const snapshot = await getDocs(imagesRef);
+      const images = snapshot.docs
+        .map(doc => ({ id: doc.id, ...doc.data() }))
+        .sort((a, b) => parseInt(a.id) - parseInt(b.id));
+      setImageList(images);
+    } catch (error) {
+      console.error('Error fetching images:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to load image data',
+        status: 'error',
+        duration: 3000,
+      });
+    }
+  };
+
+  // Handle prompt updates
+  const handleUpdatePrompt = async (imageId) => {
+    try {
+      await updateDoc(doc(db, 'images', imageId), {
+        prompt: editingPrompt.trim()
+      });
+      
+      toast({
+        title: 'Success',
+        description: 'Prompt updated successfully',
+        status: 'success',
+        duration: 3000,
+      });
+      
+      setEditingImageId(null);
+      setEditingPrompt('');
+      fetchImageData();
+    } catch (error) {
+      console.error('Error updating prompt:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to update prompt',
+        status: 'error',
+        duration: 3000,
+      });
+    }
+  };
+
+  // Load image data on mount
+  useEffect(() => {
+    fetchImageData();
+  }, []);
+
+  // System status check
   const checkSystemStatus = useCallback(async () => {
     try {
       const imagesRef = collection(db, 'images');
@@ -60,6 +179,7 @@ const AdminDashboard = () => {
     }
   }, [toast]);
 
+  // Fetch statistics
   const fetchStats = useCallback(async () => {
     try {
       const imagesRef = collection(db, 'images');
@@ -88,6 +208,7 @@ const AdminDashboard = () => {
     }
   }, [toast]);
 
+  // Fetch login IDs
   const fetchLoginIds = useCallback(async () => {
     try {
       const loginSnapshot = await getDocs(collection(db, 'loginIDs'));
@@ -113,7 +234,6 @@ const AdminDashboard = () => {
         };
       });
 
-      console.log('Found evaluators:', ids.length);
       setLoginIds(ids);
     } catch (error) {
       console.error('Error fetching login IDs:', error);
@@ -126,6 +246,7 @@ const AdminDashboard = () => {
     }
   }, [toast]);
 
+  // Auth check effect
   useEffect(() => {
     const checkAuthAndAdmin = async () => {
       setIsAuthChecking(true);
@@ -133,18 +254,11 @@ const AdminDashboard = () => {
         console.log('Starting auth check...');
         
         const unsubscribe = auth.onAuthStateChanged(async (user) => {
-          console.log('Auth state changed:', {
-            user: user ? 'exists' : 'null',
-            uid: user?.uid,
-            isAnonymous: user?.isAnonymous
-          });
-  
           const loginId = sessionStorage.getItem('userLoginId');
           const isAdmin = sessionStorage.getItem('isAdmin');
   
           if (!user || loginId !== 'ADMIN' || !isAdmin) {
             console.log('Invalid admin session, redirecting to login');
-            // Only clear session if we're not in the process of logging in
             if (!window.location.pathname.includes('/login')) {
               sessionStorage.clear();
               navigate('/login');
@@ -178,7 +292,7 @@ const AdminDashboard = () => {
     checkAuthAndAdmin();
   }, [navigate, checkSystemStatus, fetchStats, fetchLoginIds]);
 
-
+  // Handler functions
   const handleAddLoginId = async () => {
     if (!loginId.trim()) {
       toast({
@@ -366,6 +480,19 @@ const AdminDashboard = () => {
     return "red";
   };
 
+  // Preview image function (optional)
+  const handleImagePreview = async (imageId) => {
+    try {
+      const imageRef = storageRef(storage, `artwork-images/${imageId}.jpg`);
+      const url = await getDownloadURL(imageRef);
+      // You could store this URL in state and show it in a modal
+      return url;
+    } catch (error) {
+      console.error('Error getting image URL:', error);
+      return null;
+    }
+  };
+
   if (isAuthChecking || isLoading || initializing) {
     return (
       <Flex minH="100vh" align="center" justify="center">
@@ -376,7 +503,6 @@ const AdminDashboard = () => {
       </Flex>
     );
   }
-
 
 
   return (
@@ -393,6 +519,7 @@ const AdminDashboard = () => {
           <Tab>Image Statistics</Tab>
           <Tab>User Management</Tab>
           <Tab>System Controls</Tab>
+          <Tab>Image Management</Tab>
         </TabList>
         
         <TabPanels>
@@ -600,6 +727,109 @@ const AdminDashboard = () => {
               </VStack>
             </Box>
           </TabPanel>
+
+          {/* Image Management Panel */}
+          <TabPanel>
+            <Box p={6} bg="white" rounded="md" shadow="sm">
+              <VStack spacing={6} align="stretch">
+                <Heading size="md">Image & Prompt Management</Heading>
+                
+                <Box overflowX="auto">
+                  <Table variant="simple">
+                    <Thead>
+                      <Tr>
+                        <Th>Image ID</Th>
+                        <Th>Image</Th>
+                        <Th>Prompt</Th>
+                        <Th width="150px">Actions</Th>
+                      </Tr>
+                    </Thead>
+                    <Tbody>
+                      {imageList.map((image) => (
+                        <Tr key={image.id}>
+                          <Td>Image {image.id}</Td>
+                          <Td width="200px">
+                            <VStack spacing={2} align="start">
+                              <Input
+                                type="file"
+                                accept="image/*"
+                                onChange={(e) => handleImageUpload(image.id, e.target.files[0])}
+                                display="none"
+                                id={`file-upload-${image.id}`}
+                              />
+                              <Button
+                                as="label"
+                                htmlFor={`file-upload-${image.id}`}
+                                size="sm"
+                                colorScheme="teal"
+                                cursor="pointer"
+                                isLoading={uploadingImage === image.id}
+                                leftIcon={<EditIcon />}
+                                width="full"
+                              >
+                                {image.imageUrl ? 'Replace Image' : 'Upload Image'}
+                              </Button>
+                              {uploadingImage === image.id && (
+                                <Progress 
+                                  size="xs" 
+                                  isIndeterminate 
+                                  width="full" 
+                                  colorScheme="teal" 
+                                />
+                              )}
+                            </VStack>
+                          </Td>
+                          <Td>
+                            {editingImageId === image.id ? (
+                              <Textarea
+                                value={editingPrompt}
+                                onChange={(e) => setEditingPrompt(e.target.value)}
+                                size="sm"
+                                rows={3}
+                              />
+                            ) : (
+                              <Text>{image.prompt || 'No prompt set'}</Text>
+                            )}
+                          </Td>
+                          <Td>
+                            {editingImageId === image.id ? (
+                              <HStack spacing={2}>
+                                <IconButton
+                                  icon={<CheckIcon />}
+                                  colorScheme="green"
+                                  size="sm"
+                                  onClick={() => handleUpdatePrompt(image.id)}
+                                />
+                                <IconButton
+                                  icon={<CloseIcon />}
+                                  colorScheme="red"
+                                  size="sm"
+                                  onClick={() => {
+                                    setEditingImageId(null);
+                                    setEditingPrompt('');
+                                  }}
+                                />
+                              </HStack>
+                            ) : (
+                              <IconButton
+                                icon={<EditIcon />}
+                                colorScheme="blue"
+                                size="sm"
+                                onClick={() => {
+                                  setEditingImageId(image.id);
+                                  setEditingPrompt(image.prompt || '');
+                                }}
+                              />
+                            )}
+                          </Td>
+                        </Tr>
+                      ))}
+                    </Tbody>
+                  </Table>
+                </Box>
+              </VStack>
+            </Box>
+          </TabPanel>
         </TabPanels>
       </Tabs>
 
@@ -660,6 +890,6 @@ const AdminDashboard = () => {
       </AlertDialog>
     </Container>
   );
-}
+};
 
 export default AdminDashboard;

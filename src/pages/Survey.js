@@ -57,13 +57,6 @@ const Survey = () => {
       return;
     }
   
-    // Remove refresh handler - this was causing the logout issue
-    // window.onbeforeunload = () => {
-    //   sessionStorage.removeItem('userLoginId');
-    //   sessionStorage.removeItem('isAdmin');
-    //   auth.signOut();
-    // };
-  
     let authUnsubscribe;
     const initAuth = async () => {
       try {
@@ -75,7 +68,6 @@ const Survey = () => {
           return;
         }
   
-        // Check completion status
         const isCompleted = await checkSurveyCompletion(loginId);
         if (isCompleted) {
           console.log('User has completed all surveys, redirecting to completion');
@@ -126,6 +118,10 @@ const Survey = () => {
 
         const verifiedImages = await Promise.all(
           assignedBatch.map(async (imageId) => {
+            // Get the image document from Firestore to get the prompt
+            const imageDoc = await getDoc(doc(db, 'images', imageId));
+            const imageData = imageDoc.exists() ? imageDoc.data() : {};
+            
             // Try all supported extensions
             for (const ext of ['.jpg', '.jpeg', '.png']) {
               const imageRef = ref(storage, `artwork-images/${imageId}${ext}`);
@@ -136,7 +132,8 @@ const Survey = () => {
                   id: imageId,
                   imageUrl,
                   order: parseInt(imageId),
-                  format: ext.substring(1) // Store the format that worked
+                  format: ext.substring(1),
+                  prompt: imageData.prompt || `Image ${imageId}` // Include the prompt
                 };
               } catch (error) {
                 console.log(`Could not find image ${imageId}${ext}, trying next format...`);
@@ -308,7 +305,6 @@ const Survey = () => {
     return `${QUALTRICS_SURVEY_URL}?${encodeQualtricsParams(params)}`;
   };
 
-
   if (loading || initializing) {
     return (
       <Flex minH="100vh" align="center" justify="center">
@@ -364,16 +360,33 @@ const Survey = () => {
         <Flex gap={8} direction={{ base: "column", lg: "row" }}>
           {/* Image Display */}
           <Box flex="2" bg="white" p={6} borderRadius="lg" boxShadow="md">
-            <Image
-              src={images[currentIndex]?.imageUrl}
-              alt={`Artwork ${currentIndex + 1}`}
-              w="full"
-              h="auto"
-              maxH="70vh"
-              objectFit="contain"
-              borderRadius="md"
-              fallback={<Spinner />}
-            />
+            <VStack spacing={4} align="stretch">
+              <Image
+                src={images[currentIndex]?.imageUrl}
+                alt={`Artwork ${currentIndex + 1}`}
+                w="full"
+                h="auto"
+                maxH="70vh"
+                objectFit="contain"
+                borderRadius="md"
+                fallback={<Spinner />}
+              />
+              
+              {/* Prompt Display */}
+              {images[currentIndex]?.prompt && (
+                <Box
+                  p={4}
+                  bg="gray.50"
+                  borderRadius="md"
+                  borderLeft="4px"
+                  borderColor="blue.500"
+                >
+                  <Text fontSize="lg" color="gray.700">
+                    {images[currentIndex].prompt}
+                  </Text>
+                </Box>
+              )}
+            </VStack>
           </Box>
 
           {/* Survey Form */}
