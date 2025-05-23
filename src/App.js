@@ -1,11 +1,13 @@
-// src/App.js
+// src/App.js - Simplified version
 import React, { useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import { ChakraProvider, extendTheme } from '@chakra-ui/react';
 import Login from './pages/Login';
 import Survey from './pages/Survey';
 import AdminDashboard from './pages/AdminDashboard';
 import Completion from './pages/Completion';
+import Setup from './pages/Setup';
+import ConsentPage from './pages/ConsentPage';
 
 const theme = extendTheme({
   styles: {
@@ -15,54 +17,27 @@ const theme = extendTheme({
   }
 });
 
-const SurveyWrapper = () => {
-  const navigate = useNavigate();
-  const location = useLocation();
-
-  useEffect(() => {
-    const handleSurveyComplete = (event) => {
-      if (event.data.surveyComplete) {
-        const params = new URLSearchParams(location.search);
-        const currentImageNumber = Number(params.get('imageNumber') || 1);
-        if (currentImageNumber >= 12) {
-          navigate('/completion');
-        } else {
-          navigate(`/survey?imageNumber=${currentImageNumber + 1}`);
-        }
-      }
-    };
-
-    window.addEventListener('message', handleSurveyComplete);
-    return () => window.removeEventListener('message', handleSurveyComplete);
-  }, [navigate, location]);
-
-  return <Survey />;
-};
-
-// Updated PrivateRoute component with role checking
+// Simple route protection
 const PrivateRoute = ({ children }) => {
   const navigate = useNavigate();
   const loginId = sessionStorage.getItem('userLoginId');
-  const isAdmin = sessionStorage.getItem('isAdmin');
 
   useEffect(() => {
-    // If no authentication at all, redirect to login
-    if (!loginId && !isAdmin) {
+    if (!loginId) {
       navigate('/login', { replace: true });
     }
-  }, [loginId, isAdmin, navigate]);
+  }, [loginId, navigate]);
 
   return children;
 };
 
-// Updated AdminRoute component with strict admin checking
+// Admin-only route
 const AdminRoute = ({ children }) => {
   const navigate = useNavigate();
   const isAdmin = sessionStorage.getItem('isAdmin');
   const loginId = sessionStorage.getItem('userLoginId');
 
   useEffect(() => {
-    // Specifically check for admin credentials
     if (!isAdmin || loginId !== 'ADMIN') {
       navigate('/login', { replace: true });
     }
@@ -71,21 +46,13 @@ const AdminRoute = ({ children }) => {
   return children;
 };
 
-// Root component to handle initial auth check
+// Simple redirect to login
 const RootRedirect = () => {
   const navigate = useNavigate();
-  const isAdmin = sessionStorage.getItem('isAdmin');
-  const loginId = sessionStorage.getItem('userLoginId');
-
+  
   useEffect(() => {
-    if (isAdmin && loginId === 'ADMIN') {
-      navigate('/admin', { replace: true });
-    } else if (loginId && !isAdmin) {
-      navigate('/survey', { replace: true });
-    } else {
-      navigate('/login', { replace: true });
-    }
-  }, [navigate, isAdmin, loginId]);
+    navigate('/login', { replace: true });
+  }, [navigate]);
 
   return null;
 };
@@ -96,11 +63,20 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/setup" element={<Setup />} />
+          <Route 
+            path="/consent" 
+            element={
+              <PrivateRoute>
+                <ConsentPage />
+              </PrivateRoute>
+            } 
+          />
           <Route 
             path="/survey" 
             element={
               <PrivateRoute>
-                <SurveyWrapper />
+                <Survey />
               </PrivateRoute>
             } 
           />

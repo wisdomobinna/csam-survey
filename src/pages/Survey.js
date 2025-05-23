@@ -1,11 +1,9 @@
-// src/pages/Survey.js
+// src/pages/Survey.js (Updated version with consent check)
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { doc, getDoc, updateDoc, writeBatch, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { ref, getDownloadURL } from 'firebase/storage';
-import { db, storage, auth } from '../firebase/config';
-import { onAuthStateChanged } from 'firebase/auth';
-import { trackAssessment, assignImageBatch, checkSurveyCompletion } from '../utils/assessment-tracking';
+import { db, storage } from '../firebase/config';
 import {
   Box,
   Flex,
@@ -22,7 +20,7 @@ import {
   useToast,
 } from '@chakra-ui/react';
 
-const QUALTRICS_SURVEY_URL = "https://georgetown.az1.qualtrics.com/jfe/form/SV_e8oQEoEpj7Lkv5k";
+const QUALTRICS_SURVEY_URL = "https://georgetown.az1.qualtrics.com/jfe/form/SV_2uHTpoplf5gc1SK";
 
 const encodeQualtricsParams = (params) => {
   return Object.entries(params)
@@ -34,10 +32,8 @@ const Survey = () => {
   const [images, setImages] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [initializing, setInitializing] = useState(true);
   const [error, setError] = useState('');
   const [formSubmitted, setFormSubmitted] = useState(false);
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [surveyLoaded, setSurveyLoaded] = useState(false);
   const [lastResponse, setLastResponse] = useState(null);
   const [canLoadNextForm, setCanLoadNextForm] = useState(true);
@@ -47,135 +43,149 @@ const Survey = () => {
   const toast = useToast();
   const loginId = sessionStorage.getItem('userLoginId');
 
-  // Authentication Effect
-  useEffect(() => {
-    const loginId = sessionStorage.getItem('userLoginId');
-    
+  // Load user data and images
+  const loadUserData = async () => {
     if (!loginId) {
-      console.log('No loginId found, redirecting to login');
       navigate('/login');
       return;
     }
-  
-    let authUnsubscribe;
-    const initAuth = async () => {
-      try {
-        if (!auth.currentUser) {
-          console.log('No user found, redirecting to login');
-          sessionStorage.removeItem('userLoginId');
-          sessionStorage.removeItem('isAdmin');
-          navigate('/login');
-          return;
-        }
-  
-        const isCompleted = await checkSurveyCompletion(loginId);
-        if (isCompleted) {
-          console.log('User has completed all surveys, redirecting to completion');
-          navigate('/completion');
-          return;
-        }
-  
-        console.log('User authenticated:', auth.currentUser.uid);
-        setIsAuthenticated(true);
-        setInitializing(false);
-      } catch (error) {
-        console.error('Auth initialization error:', error);
-        setError('Failed to initialize authentication');
-        setInitializing(false);
-        navigate('/login');
-      }
-    };
-  
-    initAuth();
-    return () => {
-      if (authUnsubscribe) authUnsubscribe();
-    };
-  }, [navigate]);
 
-  // Load Images Effect
-  useEffect(() => {
-    const loadImages = async () => {
-      if (!loginId || !isAuthenticated) {
-        console.log('No loginId or not authenticated yet');
+    try {
+      setLoading(true);
+      
+      // Get user data from Firestore
+      const userRef = doc(db, 'loginIDs', loginId);
+      const userDoc = await getDoc(userRef);
+      
+      if (!userDoc.exists()) {
+        throw new Error('User not found');
+      }
+      
+      const userData = userDoc.data();
+      
+      // Check if user has consented
+      if (!userData.hasConsented) {
+        console.log('User has not consented, redirecting to consent page');
+        navigate('/consent');
         return;
       }
-
-      try {
-        setLoading(true);
-        const userRef = doc(db, 'userProgress', loginId);
-        const userDoc = await getDoc(userRef);
-        let assignedBatch;
-        
-        if (userDoc.exists() && userDoc.data()?.assignedBatch?.length > 0) {
-          assignedBatch = userDoc.data().assignedBatch;
-        } else {
-          assignedBatch = await assignImageBatch(loginId);
-        }
-
-        if (!assignedBatch?.length) {
-          throw new Error('No image batch assigned');
-        }
-
-        const verifiedImages = await Promise.all(
-          assignedBatch.map(async (imageId) => {
-            // Get the image document from Firestore to get the prompt
-            const imageDoc = await getDoc(doc(db, 'images', imageId));
-            const imageData = imageDoc.exists() ? imageDoc.data() : {};
-            
-            // Try all supported extensions
-            for (const ext of ['.jpg', '.jpeg', '.png']) {
-              const imageRef = ref(storage, `artwork-images/${imageId}${ext}`);
-              try {
-                const imageUrl = await getDownloadURL(imageRef);
-                console.log(`Successfully loaded image ${imageId}${ext}`);
-                return {
-                  id: imageId,
-                  imageUrl,
-                  order: parseInt(imageId),
-                  format: ext.substring(1),
-                  prompt: imageData.prompt || `Image ${imageId}` // Include the prompt
-                };
-              } catch (error) {
-                console.log(`Could not find image ${imageId}${ext}, trying next format...`);
-                continue;
-              }
-            }
-            console.warn(`Image ${imageId} not found in any supported format`);
-            return null;
-          })
-        );
-
-        const validImages = verifiedImages
-          .filter(img => img !== null)
-          .sort((a, b) => a.order - b.order);
-
-        if (validImages.length === 0) {
-          throw new Error('No valid images found in storage');
-        }
-
+      
+      // Get assigned images
+      const assignedImages = userData.assignedImages || [];
+      const completedImages = userData.completedImages || 0;
+      
+      if (assignedImages.length === 0) {
+        throw new Error('No images assigned to this user');
+      }
+      
+      // If marked as completed but hasn't viewed all images, fix the data
+      if (userData.surveyCompleted && completedImages < assignedImages.length) {
         await updateDoc(userRef, {
-          assignedBatch: validImages.map(img => img.id),
+          surveyCompleted: false,
           lastUpdated: serverTimestamp()
         });
-
-        setImages(validImages);
-        
-        const progress = userDoc.exists() ? (userDoc.data().progress || 0) : 0;
-        setCurrentIndex(Math.min(progress, validImages.length - 1));
-        setLoading(false);
-      } catch (error) {
-        console.error('Error loading images:', error);
-        setError(`Failed to load survey: ${error.message}`);
-        setLoading(false);
       }
-    };
 
-    if (isAuthenticated && !initializing) {
-      loadImages();
+      // Load images from Firebase Storage
+      const verifiedImages = await Promise.all(
+        assignedImages.map(async (imageId, index) => {
+          try {
+            // Get image document to find URL info
+            const imageDocRef = doc(db, 'images', imageId);
+            const imageDoc = await getDoc(imageDocRef);
+            
+            if (!imageDoc.exists()) {
+              console.error(`Image document ${imageId} not found in Firestore`);
+              throw new Error(`Image document ${imageId} not found`);
+            }
+            
+            const imageData = imageDoc.data();
+            console.log(`Image data for ${imageId}:`, imageData);
+            
+            // Check if we have a URL (from the old format) or storagePath (from the new format)
+            let storagePath;
+            
+            if (imageData.storagePath) {
+              // If storagePath exists, use it, but make sure it has the images/ prefix
+              storagePath = imageData.storagePath.includes('/') 
+                ? imageData.storagePath 
+                : `images/${imageData.storagePath}`;
+            } else if (imageData.url) {
+              // Extract the image number from the imageId
+              const matches = imageId.match(/(\d+)/);
+              const imageNumber = matches ? parseInt(matches[0]) : 1;
+              
+              // Reconstruct the path using the known format in Storage
+              storagePath = `images/img_${imageNumber.toString().padStart(4, '0')}.jpeg`;
+              
+              console.log(`Converted path from ${imageData.url} to ${storagePath}`);
+            } else {
+              console.error(`No URL or storage path found for image ${imageId}`);
+              throw new Error(`No URL or storage path found for image ${imageId}`);
+            }
+            
+            console.log(`Attempting to load image from Firebase Storage: ${storagePath}`);
+            
+            try {
+              // Get download URL from Firebase Storage
+              const imageRef = ref(storage, storagePath);
+              const imageUrl = await getDownloadURL(imageRef);
+              
+              console.log(`Successfully loaded image ${imageId} from ${storagePath}`);
+              
+              return {
+                id: imageId,
+                imageUrl: imageUrl,
+                order: index + 1,
+                format: imageData.fileExtension || '.jpg',
+                prompt: `Please evaluate this image`
+              };
+            } catch (storageError) {
+              console.error(`Storage error for ${imageId}:`, storageError);
+              
+              // FALLBACK: Use inline SVG data URI to ensure it works offline
+              return {
+                id: imageId,
+                imageUrl: `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='800' height='600' viewBox='0 0 800 600'%3E%3Crect width='800' height='600' fill='%23f0f0f0'/%3E%3Ctext x='400' y='300' font-family='Arial' font-size='32' text-anchor='middle' dominant-baseline='middle'%3EImage ${imageId}%3C/text%3E%3C/svg%3E`,
+                order: index + 1,
+                format: imageData.fileExtension || '.jpg',
+                prompt: `Please evaluate this image (placeholder)`
+              };
+            }
+          } catch (error) {
+            console.error(`Error loading image ${imageId}:`, error);
+            
+            // Return a fallback placeholder instead of null
+            return {
+              id: imageId,
+              imageUrl: `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='800' height='600' viewBox='0 0 800 600'%3E%3Crect width='800' height='600' fill='%23f0f0f0'/%3E%3Ctext x='400' y='300' font-family='Arial' font-size='32' text-anchor='middle' dominant-baseline='middle'%3EFallback ${imageId}%3C/text%3E%3C/svg%3E`,
+              order: index + 1,
+              format: '.jpg',
+              prompt: `Please evaluate this image (fallback)`
+            };
+          }
+        })
+      );
+
+      // We don't need to filter out nulls since we're always returning something now
+      setImages(verifiedImages);
+      
+      // Set current index to the number of completed images
+      setCurrentIndex(Math.min(completedImages, verifiedImages.length - 1));
+      setLoading(false);
+    } catch (error) {
+      console.error('Error loading user data:', error);
+      setError(`Failed to load survey: ${error.message}`);
+      setLoading(false);
     }
-  }, [loginId, navigate, isAuthenticated, initializing]);
+  };
 
-  // Survey Completion Effect
+  // Load data on mount
+  useEffect(() => {
+    loadUserData();
+  }, []);
+
+  // Handle Qualtrics messages
   useEffect(() => {
     const handleMessage = (event) => {
       if (event.origin !== "https://georgetown.az1.qualtrics.com") return;
@@ -234,23 +244,25 @@ const Survey = () => {
     }
 
     try {
-      await trackAssessment(images[currentIndex].id, loginId, {
-        responseId: lastResponse,
-        completedAt: new Date().toISOString(),
-        imageNumber: currentIndex + 1
-      });
+      const userRef = doc(db, 'loginIDs', loginId);
       
-      const userRef = doc(db, 'userProgress', loginId);
+      // Update progress
       await updateDoc(userRef, {
-        progress: currentIndex + 1,
-        [`completedImages.${images[currentIndex].id}`]: {
-          completedAt: serverTimestamp(),
-          responseId: lastResponse
-        },
+        completedImages: currentIndex + 1,
         lastUpdated: serverTimestamp()
       });
 
       if (currentIndex >= images.length - 1) {
+        // Mark survey as completed
+        await updateDoc(userRef, {
+          surveyCompleted: true,
+          completedAt: serverTimestamp()
+        });
+        
+        // Set in session storage
+        sessionStorage.setItem('surveyCompleted', 'true');
+        
+        // Navigate to completion
         navigate('/completion');
       } else {
         setFormSubmitted(false);
@@ -260,7 +272,7 @@ const Survey = () => {
         setCurrentIndex(prev => prev + 1);
       }
     } catch (error) {
-      console.error('Error tracking assessment:', error);
+      console.error('Error updating progress:', error);
       toast({
         title: "Error",
         description: "Failed to save progress. Please try again.",
@@ -272,11 +284,9 @@ const Survey = () => {
   };
 
   const handleLogout = () => {
-    auth.signOut().then(() => {
-      sessionStorage.removeItem('userLoginId');
-      sessionStorage.removeItem('isAdmin');
-      navigate('/login');
-    });
+    sessionStorage.removeItem('userLoginId');
+    sessionStorage.removeItem('isAdmin');
+    navigate('/login');
   };
 
   const handleSurveyError = (error) => {
@@ -305,7 +315,7 @@ const Survey = () => {
     return `${QUALTRICS_SURVEY_URL}?${encodeQualtricsParams(params)}`;
   };
 
-  if (loading || initializing) {
+  if (loading) {
     return (
       <Flex minH="100vh" align="center" justify="center">
         <VStack spacing={4}>
@@ -339,7 +349,7 @@ const Survey = () => {
       <Box position="fixed" top={0} left={0} right={0} bg="white" boxShadow="sm" zIndex={10}>
         <Container maxW="7xl" py={4}>
           <Flex justify="space-between" align="center" mb={2}>
-            <Heading size="lg">Art Survey</Heading>
+            <Heading size="lg">Survey</Heading>
             <Flex gap={4} align="center">
               <Text>Image {currentIndex + 1} of {images.length}</Text>
               <Button 
@@ -351,7 +361,7 @@ const Survey = () => {
               </Button>
             </Flex>
           </Flex>
-          <Progress value={(currentIndex / images.length) * 100} size="sm" />
+          <Progress value={((currentIndex + 1) / images.length) * 100} size="sm" />
         </Container>
       </Box>
 
@@ -372,20 +382,27 @@ const Survey = () => {
                 fallback={<Spinner />}
               />
               
-              {/* Prompt Display */}
-              {images[currentIndex]?.prompt && (
-                <Box
-                  p={4}
-                  bg="gray.50"
-                  borderRadius="md"
-                  borderLeft="4px"
-                  borderColor="blue.500"
-                >
-                  <Text fontSize="lg" color="gray.700">
-                    {images[currentIndex].prompt}
-                  </Text>
-                </Box>
-              )}
+              {/* Image Info */}
+              <Box
+                p={4}
+                bg="gray.50"
+                borderRadius="md"
+                borderLeft="4px"
+                borderColor="blue.500"
+              >
+                <Text fontSize="lg" color="gray.700">
+                  Image {currentIndex + 1} of {images.length}
+                </Text>
+                <Text fontSize="sm" color="gray.500">
+                  ID: {images[currentIndex]?.id}
+                </Text>
+                {images[currentIndex]?.imageUrl.includes('svg+xml') && (
+                  <Alert status="info" mt={2} size="sm">
+                    <AlertIcon />
+                    Using placeholder image for testing
+                  </Alert>
+                )}
+              </Box>
             </VStack>
           </Box>
 
@@ -393,7 +410,10 @@ const Survey = () => {
           <Box flex="3" bg="white" borderRadius="lg" boxShadow="md" h="800px" overflow="hidden">
             {!surveyLoaded && (
               <Flex h="full" align="center" justify="center">
-                <Spinner size="xl" />
+                <VStack spacing={4}>
+                  <Spinner size="xl" />
+                  <Text>Loading survey form...</Text>
+                </VStack>
               </Flex>
             )}
             {canLoadNextForm && (

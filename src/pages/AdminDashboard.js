@@ -3,8 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { collection, getDocs, doc, getDoc, writeBatch, serverTimestamp, updateDoc } from 'firebase/firestore';
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, auth, storage } from '../firebase/config';
-import { initializeFirestore } from '../utils/firebaseSetup';
-import { createBalancedAssignments, clearAllAssignments } from '../utils/assignmentSystem';
+import { initializeFirestore, verifySetup, clearAllData } from '../utils/firebaseSetup';
+import { createBalancedAssignments } from '../utils/assignmentSystem';
 import DatabaseStats from '../components/DatabaseStats';
 
 import {
@@ -16,7 +16,8 @@ import {
   useToast, Flex, VStack, Spinner,
   AlertDialog, AlertDialogBody, AlertDialogFooter,
   AlertDialogHeader, AlertDialogContent, AlertDialogOverlay,
-  Textarea, IconButton, useDisclosure,
+  Textarea, IconButton,
+  Alert, AlertIcon
 } from '@chakra-ui/react';
 import { EditIcon, CheckIcon, CloseIcon } from '@chakra-ui/icons';
 
@@ -44,7 +45,9 @@ const AdminDashboard = () => {
   const [editingPrompt, setEditingPrompt] = useState('');
   const [imageList, setImageList] = useState([]);
   const [uploadingImage, setUploadingImage] = useState(null);
-  const [uploadProgress, setUploadProgress] = useState(0);
+  
+  // Add verification result state
+  const [verificationResult, setVerificationResult] = useState(null);
 
   const cancelRef = React.useRef();
   const navigate = useNavigate();
@@ -56,7 +59,6 @@ const AdminDashboard = () => {
 
     try {
       setUploadingImage(imageId);
-      setUploadProgress(0);
 
       // Validate file
       if (file.size > 5000000) { // 5MB limit
@@ -102,7 +104,6 @@ const AdminDashboard = () => {
       });
     } finally {
       setUploadingImage(null);
-      setUploadProgress(0);
     }
   };
 
@@ -399,13 +400,28 @@ const AdminDashboard = () => {
   const handleInitializeSystem = async () => {
     setIsLoading(true);
     try {
-      await initializeFirestore();
-      toast({
-        title: 'Success',
-        description: 'System initialized with 300 images',
-        status: 'success',
-        duration: 5000,
-      });
+      const result = await initializeFirestore();
+      
+      if (result) {
+        toast({
+          title: 'Success',
+          description: 'Database initialized with 1000 images and 200 users',
+          status: 'success',
+          duration: 5000,
+        });
+        
+        // Verify the setup
+        const verification = await verifySetup();
+        setVerificationResult(verification);
+      } else {
+        toast({
+          title: 'Info',
+          description: 'Database already initialized',
+          status: 'info',
+          duration: 3000,
+        });
+      }
+      
       await checkSystemStatus();
       await fetchStats();
     } catch (error) {
@@ -414,6 +430,39 @@ const AdminDashboard = () => {
         description: error.message,
         status: 'error',
         duration: 5000,
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleVerifySetup = async () => {
+    setIsLoading(true);
+    try {
+      const verification = await verifySetup();
+      setVerificationResult(verification);
+      
+      if (verification.success) {
+        toast({
+          title: 'Verification Complete',
+          description: 'System setup verified successfully',
+          status: 'success',
+          duration: 3000,
+        });
+      } else {
+        toast({
+          title: 'Verification Failed',
+          description: verification.message || 'System not properly initialized',
+          status: 'error',
+          duration: 3000,
+        });
+      }
+    } catch (error) {
+      toast({
+        title: 'Error',
+        description: 'Failed to verify setup',
+        status: 'error',
+        duration: 3000,
       });
     } finally {
       setIsLoading(false);
@@ -446,10 +495,11 @@ const AdminDashboard = () => {
   const handleResetSystem = async () => {
     setIsLoading(true);
     try {
-      await clearAllAssignments();
+      await clearAllData();
+      setVerificationResult(null);
       toast({
         title: 'Success',
-        description: 'System reset successfully',
+        description: 'All data cleared successfully',
         status: 'success',
         duration: 5000,
       });
@@ -480,19 +530,6 @@ const AdminDashboard = () => {
     return "red";
   };
 
-  // Preview image function (optional)
-  const handleImagePreview = async (imageId) => {
-    try {
-      const imageRef = storageRef(storage, `artwork-images/${imageId}.jpg`);
-      const url = await getDownloadURL(imageRef);
-      // You could store this URL in state and show it in a modal
-      return url;
-    } catch (error) {
-      console.error('Error getting image URL:', error);
-      return null;
-    }
-  };
-
   if (isAuthChecking || isLoading || initializing) {
     return (
       <Flex minH="100vh" align="center" justify="center">
@@ -503,7 +540,6 @@ const AdminDashboard = () => {
       </Flex>
     );
   }
-
 
   return (
     <Container maxW="container.xl" py={6}>
@@ -658,8 +694,8 @@ const AdminDashboard = () => {
                     <Stat>
                       <StatLabel>Images in Firestore</StatLabel>
                       <StatNumber>{systemStatus.imageCount}</StatNumber>
-                      <StatLabel fontSize="sm" color={systemStatus.imageCount === 300 ? "green.500" : "orange.500"}>
-                        {systemStatus.imageCount === 300 
+                      <StatLabel fontSize="sm" color={systemStatus.imageCount === 1000 ? "green.500" : "orange.500"}>
+                        {systemStatus.imageCount === 1000 
                           ? "✓ Correct number of images" 
                           : systemStatus.imageCount > 0 
                             ? "⚠️ Incomplete image set"
@@ -676,37 +712,53 @@ const AdminDashboard = () => {
                   </HStack>
                 </Box>
 
+                {/* Verification Results */}
+                {verificationResult && (
+                  <Alert status={verificationResult.success ? "success" : "error"}>
+                    <AlertIcon />
+                    <Box>
+                      <Text fontWeight="bold">Verification Results:</Text>
+                      <Text>Images: {verificationResult.status?.imageCount}/{verificationResult.status?.expectedImages}</Text>
+                      <Text>Users: {verificationResult.status?.userCount}/{verificationResult.status?.expectedUsers}</Text>
+                      {verificationResult.sampleUser && (
+                        <>
+                          <Text mt={2} fontWeight="bold">Sample User:</Text>
+                          <Text>Login ID: {verificationResult.sampleUser.loginId}</Text>
+                          <Text>Password Valid: {verificationResult.sampleUser.passwordCorrect ? 'Yes' : 'No'}</Text>
+                          <Text>Assigned Images: {verificationResult.sampleUser.assignedImages?.length}</Text>
+                        </>
+                      )}
+                    </Box>
+                  </Alert>
+                )}
+
                 <Box>
-                  <Text mb={2} fontWeight="bold">Initialize Image System</Text>
+                  <Text mb={2} fontWeight="bold">Initialize System</Text>
                   <Button
                     colorScheme="blue"
                     onClick={handleInitializeSystem}
                     isLoading={isLoading}
-                    isDisabled={systemStatus.imageCount === 300}
                     width="full"
                   >
-                    Initialize System with 300 Images
+                    Initialize Database (1000 Images, 200 Users)
                   </Button>
                   <Text fontSize="sm" color="gray.600" mt={1}>
-                    {systemStatus.imageCount === 300 
-                      ? "System is fully initialized" 
-                      : `Current image count: ${systemStatus.imageCount}/300`}
+                    Creates 1000 images and 200 users with rolling password pattern
                   </Text>
                 </Box>
 
                 <Box>
-                  <Text mb={2} fontWeight="bold">Create Assignments</Text>
+                  <Text mb={2} fontWeight="bold">Verify Setup</Text>
                   <Button
                     colorScheme="green"
-                    onClick={handleCreateAssignments}
+                    onClick={handleVerifySetup}
                     isLoading={isLoading}
-                    isDisabled={systemStatus.imageCount !== 300}
                     width="full"
                   >
-                    Create Balanced Assignments
+                    Verify System Setup
                   </Button>
                   <Text fontSize="sm" color="gray.600" mt={1}>
-                    Assign 12 images to each evaluator ensuring equal distribution
+                    Check if all users and images are properly configured
                   </Text>
                 </Box>
 
@@ -718,11 +770,22 @@ const AdminDashboard = () => {
                     isLoading={isLoading}
                     width="full"
                   >
-                    Reset All Assignments
+                    Clear All Data
                   </Button>
                   <Text fontSize="sm" color="gray.600" mt={1}>
-                    Clear all assignments and progress data
+                    Delete all images, users, and assessment data
                   </Text>
+                </Box>
+
+                {/* Sample Credentials Info */}
+                <Box p={4} borderWidth="1px" borderRadius="lg" bg="blue.50">
+                  <Text fontWeight="bold" mb={2}>Sample Login Credentials:</Text>
+                  <VStack align="start" spacing={1}>
+                    <Text>Login ID: 0001 - Password: a0001</Text>
+                    <Text>Login ID: 0002 - Password: b0002</Text>
+                    <Text>Login ID: 0003 - Password: c0003</Text>
+                    <Text fontSize="sm" color="gray.600">...pattern continues (a-z + loginID)</Text>
+                  </VStack>
                 </Box>
               </VStack>
             </Box>
@@ -850,46 +913,48 @@ const AdminDashboard = () => {
             </AlertDialogBody>
 
             <AlertDialogFooter>
-              <Button ref={cancelRef} onClick={() => setIsLogoutDialogOpen(false)}>
-                Cancel
-              </Button>
-              <Button colorScheme="red" onClick={handleLogoutConfirm} ml={3}>
-                Logout
-              </Button>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialogOverlay>
-      </AlertDialog>
 
-      {/* Reset System Confirmation Dialog */}
-      <AlertDialog
-        isOpen={isResetDialogOpen}
-        leastDestructiveRef={cancelRef}
-        onClose={() => setIsResetDialogOpen(false)}
-      >
-        <AlertDialogOverlay>
-          <AlertDialogContent>
-            <AlertDialogHeader fontSize="lg" fontWeight="bold">
-              Reset System
-            </AlertDialogHeader>
 
-            <AlertDialogBody>
-              Are you sure? This will clear all assignments and progress data.
-            </AlertDialogBody>
+            <Button ref={cancelRef} onClick={() => setIsLogoutDialogOpen(false)}>
+               Cancel
+             </Button>
+             <Button colorScheme="red" onClick={handleLogoutConfirm} ml={3}>
+               Logout
+             </Button>
+           </AlertDialogFooter>
+         </AlertDialogContent>
+       </AlertDialogOverlay>
+     </AlertDialog>
 
-            <AlertDialogFooter>
-              <Button ref={cancelRef} onClick={() => setIsResetDialogOpen(false)}>
-                Cancel
-              </Button>
-              <Button colorScheme="red" onClick={handleResetSystem} ml={3}>
-                Reset
-              </Button>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialogOverlay>
-      </AlertDialog>
-    </Container>
-  );
+     {/* Reset System Confirmation Dialog */}
+     <AlertDialog
+       isOpen={isResetDialogOpen}
+       leastDestructiveRef={cancelRef}
+       onClose={() => setIsResetDialogOpen(false)}
+     >
+       <AlertDialogOverlay>
+         <AlertDialogContent>
+           <AlertDialogHeader fontSize="lg" fontWeight="bold">
+             Reset System
+           </AlertDialogHeader>
+
+           <AlertDialogBody>
+             Are you sure? This will clear all assignments and progress data.
+           </AlertDialogBody>
+
+           <AlertDialogFooter>
+             <Button ref={cancelRef} onClick={() => setIsResetDialogOpen(false)}>
+               Cancel
+             </Button>
+             <Button colorScheme="red" onClick={handleResetSystem} ml={3}>
+               Reset
+             </Button>
+           </AlertDialogFooter>
+         </AlertDialogContent>
+       </AlertDialogOverlay>
+     </AlertDialog>
+   </Container>
+ );
 };
 
 export default AdminDashboard;

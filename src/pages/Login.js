@@ -1,4 +1,4 @@
-// src/pages/Login.js
+// src/pages/Login.js (Updated version with consent page flow)
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
@@ -36,6 +36,7 @@ import { Info, Image as ImageIcon, CheckCircle, AlertCircle } from 'lucide-react
 
 const Login = () => {
   const [loginId, setLoginId] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(1);
@@ -44,66 +45,75 @@ const Login = () => {
   const toast = useToast();
   const totalSteps = 4;
 
-
   useEffect(() => {
     const existingLoginId = sessionStorage.getItem('userLoginId');
     const isAdmin = sessionStorage.getItem('isAdmin');
-    if (existingLoginId) {
-      navigate('/survey');
-    } else if (isAdmin) {
+    if (existingLoginId && isAdmin === 'true') {
       navigate('/admin');
+    } else if (existingLoginId) {
+      // Check if user has consented
+      const checkConsentStatus = async () => {
+        try {
+          const userRef = doc(db, 'loginIDs', existingLoginId);
+          const userDoc = await getDoc(userRef);
+          
+          if (userDoc.exists()) {
+            const userData = userDoc.data();
+            
+            // Check if survey is completed
+            const isCompleted = await checkSurveyCompletion(existingLoginId);
+            if (isCompleted) {
+              navigate('/completion');
+              return;
+            }
+            
+            // Check consent status and redirect accordingly
+            if (userData.hasConsented) {
+              navigate('/survey');
+            } else {
+              navigate('/consent');
+            }
+          }
+        } catch (error) {
+          console.error('Error checking consent status:', error);
+          // If there's an error, clear session and stay on login page
+          sessionStorage.removeItem('userLoginId');
+        }
+      };
+      
+      checkConsentStatus();
     }
   }, [navigate]);
 
-  const validateLoginId = (id) => {
-    if (id === 'ADMIN') return true;
-    const pattern = /^EV25-\d{3}$/;
-    return pattern.test(id);
-  };
-
-  const handleInputChange = (e) => {
-    let value = e.target.value.toUpperCase();
+  const validateCredentials = (id, pwd) => {
+    // Admin login check
+    if (id === 'ADMIN' && pwd === 'ADMIN') return true;
     
-    if (value === 'ADMIN') {
-      setLoginId(value);
-      return;
-    }
-
-    // If the input is being deleted, just update the state
-    if (value.length < loginId.length) {
-      setLoginId(value);
-      return;
-    }
-
-    // Add hyphen automatically after EV25
-    if (value.length === 4 && !value.includes('-')) {
-      value = value + '-';
+    // Check if login ID is numeric and within range
+    const numericId = parseInt(id);
+    if (isNaN(numericId) || numericId < 1 || numericId > 1004) {
+      return false;
     }
     
-    // Only allow numbers after EV25-
-    if (value.length > 5) {
-      const prefix = value.slice(0, 5);
-      const numbers = value.slice(5).replace(/[^0-9]/g, '');
-      value = prefix + numbers;
-    }
-
-    // Limit to the format EV25-XXX
-    if (value.length <= 8) {
-      setLoginId(value);
-    }
+    // Calculate expected password
+    const expectedPosition = ((numericId - 1) % 26);
+    const expectedLetter = String.fromCharCode(97 + expectedPosition); // a=97 in ASCII
+    const expectedPassword = expectedLetter + id.padStart(4, '0');
+    
+    return pwd === expectedPassword;
   };
 
   const handleLogin = async (e) => {
     e.preventDefault();
     setError('');
   
-    if (!loginId) {
-      setError('Please enter a login ID');
+    if (!loginId || !password) {
+      setError('Please enter both login ID and password');
       return;
     }
   
-    if (!validateLoginId(loginId)) {
-      setError('Invalid login ID format');
+    if (!validateCredentials(loginId, password)) {
+      setError('Invalid login credentials');
       return;
     }
   
@@ -137,8 +147,11 @@ const Login = () => {
       }
   
       // For regular users:
+      // Format login ID with leading zeros
+      const formattedLoginId = loginId.padStart(4, '0');
+      
       // First check if login ID exists
-      const userDoc = await getDoc(doc(db, 'loginIDs', loginId));
+      const userDoc = await getDoc(doc(db, 'loginIDs', formattedLoginId));
       
       if (!userDoc.exists()) {
         setError('Invalid login ID');
@@ -146,17 +159,17 @@ const Login = () => {
       }
   
       // Check if user has completed all surveys
-      const isCompleted = await checkSurveyCompletion(loginId);
+      const isCompleted = await checkSurveyCompletion(formattedLoginId);
       
       // Sign in anonymously
       const userCredential = await signInAnonymously(auth);
       console.log('Anonymous auth successful:', userCredential.user.uid);
   
       // Set session data
-      sessionStorage.setItem('userLoginId', loginId);
+      sessionStorage.setItem('userLoginId', formattedLoginId);
       
       // Update user's last login time
-      await updateDoc(doc(db, 'loginIDs', loginId), {
+      await updateDoc(doc(db, 'loginIDs', formattedLoginId), {
         lastLogin: serverTimestamp()
       });
   
@@ -170,7 +183,14 @@ const Login = () => {
       if (isCompleted) {
         navigate('/completion');
       } else {
-        navigate('/survey');
+        // Check if user has previously consented
+        const userData = userDoc.data();
+        if (userData.hasConsented) {
+          navigate('/survey');
+        } else {
+          // If not consented, go to consent page first
+          navigate('/consent');
+        }
       }
       
     } catch (error) {
@@ -181,26 +201,24 @@ const Login = () => {
     }
   };
 
-
- const renderTutorialStep = () => {
+  const renderTutorialStep = () => {
     switch (tutorialStep) {
       case 1:
         return (
           <VStack spacing={4} align="start">
             <Flex align="center" gap={2}>
               <Icon as={Info} color="blue.500" />
-              <Text fontSize="lg" fontWeight="bold">Welcome to the Art Survey System</Text>
+              <Text fontSize="lg" fontWeight="bold">Welcome</Text>
             </Flex>
             <Text>
-              You are participating in an important research study about visual perception in art. 
-              Your role as an evaluator is crucial for our research.
+            Welcome! Thank you for taking the time to participate in this survey.
             </Text>
             <Box p={4} bg="blue.50" borderRadius="md">
               <Text fontWeight="medium">What you'll be doing:</Text>
               <OrderedList spacing={2} mt={2}>
-                <ListItem>Viewing a series of art images</ListItem>
+                <ListItem>Viewing a series of images</ListItem>
                 <ListItem>Rating each image based on specific criteria</ListItem>
-                <ListItem>Completing evaluations for 12 unique images</ListItem>
+                <ListItem>Completing evaluations for 5 unique images</ListItem>
               </OrderedList>
             </Box>
           </VStack>
@@ -271,7 +289,7 @@ const Login = () => {
             </Text>
             <Box p={4} bg="teal.50" borderRadius="md">
               <VStack align="start" spacing={2}>
-                <Text>✓ You have 12 images to evaluate</Text>
+                <Text>✓ You have 5 images to evaluate</Text>
                 <Text>✓ Your progress is saved automatically</Text>
                 <Text>✓ You can return later to complete unfinished evaluations</Text>
                 <Text>✓ Your careful consideration is valuable for our research</Text>
@@ -293,26 +311,35 @@ const Login = () => {
       <Container maxW="md" pt={20}>
         <Card boxShadow="xl">
           <CardHeader>
-            <Heading size="lg" textAlign="center">Art Survey Portal</Heading>
+            <Heading size="lg" textAlign="center">Image Recognition Survey.</Heading>
           </CardHeader>
-          <center>Enter your Login ID</center>
           <CardBody>
             <form onSubmit={handleLogin}>
               <VStack spacing={6}>
                 <Box w="full">
+                  <Text mb={2} fontWeight="medium">Login ID</Text>
                   <Input
                     type="text"
-                    placeholder=""
+                    placeholder="Enter your login ID"
                     value={loginId}
-                    onChange={handleInputChange}
+                    onChange={(e) => setLoginId(e.target.value)}
                     textAlign="center"
                     fontSize="lg"
-                    letterSpacing="wider"
-                    maxLength={8}
                     autoComplete="off"
-                    autoCapitalize="characters"/>
-                  <Text fontSize="sm" color="gray.500" textAlign="center" mt={2}>
-                  </Text>
+                  />
+                </Box>
+
+                <Box w="full">
+                  <Text mb={2} fontWeight="medium">Password</Text>
+                  <Input
+                    type="password"
+                    placeholder="Enter your password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    textAlign="center"
+                    fontSize="lg"
+                    autoComplete="off"
+                  />
                 </Box>
 
                 {error && (
@@ -329,7 +356,7 @@ const Login = () => {
                   isLoading={loading}
                   loadingText="Logging in..."
                 >
-                  {loginId === 'ADMIN' ? 'Access Admin Dashboard' : 'Start Survey'}
+                  {loginId === 'ADMIN' ? 'Access Admin Dashboard' : 'Login'}
                 </Button>
 
                 {/* Tutorial Button */}
@@ -361,7 +388,7 @@ const Login = () => {
         <ModalOverlay />
         <ModalContent>
           <ModalHeader>
-            <Text>Art Survey Tutorial</Text>
+            <Text>Survey Tutorial</Text>
             <Text fontSize="sm" color="gray.500">
               Step {tutorialStep} of {totalSteps}
             </Text>

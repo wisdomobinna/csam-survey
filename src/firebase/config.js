@@ -1,42 +1,23 @@
 // src/firebase/config.js
-import { initializeApp } from 'firebase/app';
-import { getFirestore } from 'firebase/firestore';
-import { getStorage } from 'firebase/storage';
-import { getAuth, connectAuthEmulator } from 'firebase/auth';
+import { initializeApp } from "firebase/app";
+import { getAuth } from "firebase/auth";
+import { getFirestore } from "firebase/firestore";
+import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
-  apiKey: process.env.REACT_APP_FIREBASE_API_KEY,
-  authDomain: process.env.REACT_APP_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.REACT_APP_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.REACT_APP_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.REACT_APP_FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.REACT_APP_FIREBASE_APP_ID
+  apiKey: "AIzaSyDQW5SID37wt3gQTvNcYVRFWFXv_DZjirI",
+  authDomain: "c-image-survey.firebaseapp.com",
+  projectId: "c-image-survey",
+  storageBucket: "c-image-survey.firebasestorage.app",
+  messagingSenderId: "866519610904",
+  appId: "1:866519610904:web:aa5bb9e460c901ac53f56d",
+  measurementId: "G-QG1N64DJBK"
 };
 
 // Initialize Firebase
-let app;
-try {
-  app = initializeApp(firebaseConfig);
-} catch (error) {
-  console.error('Error initializing Firebase:', error);
-  throw error;
-}
-
-// Initialize Firebase services
+const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const storage = getStorage(app);
 
-// Development environment settings
-if (process.env.NODE_ENV === 'development') {
-  console.log('Firebase Config:', {
-    apiKey: !!firebaseConfig.apiKey,
-    authDomain: !!firebaseConfig.authDomain,
-    projectId: !!firebaseConfig.projectId,
-    storageBucket: !!firebaseConfig.storageBucket,
-    messagingSenderId: !!firebaseConfig.messagingSenderId,
-    appId: !!firebaseConfig.appId
-  });
-}
-
-export { auth, db, storage };
+export { app, auth, db, storage };
