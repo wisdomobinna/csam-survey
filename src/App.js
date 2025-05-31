@@ -1,4 +1,4 @@
-// src/App.js - Simplified version
+// src/App.js - Updated with clean login system
 import React, { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import { ChakraProvider, extendTheme } from '@chakra-ui/react';
@@ -46,11 +46,13 @@ const AdminRoute = ({ children }) => {
   return children;
 };
 
-// Simple redirect to login
+// Smart redirect based on session - but always allow fresh start from root
 const RootRedirect = () => {
   const navigate = useNavigate();
   
   useEffect(() => {
+    // Always redirect fresh visits to login page
+    // This allows users to start fresh sessions
     navigate('/login', { replace: true });
   }, [navigate]);
 
@@ -62,8 +64,13 @@ function App() {
     <ChakraProvider theme={theme}>
       <BrowserRouter>
         <Routes>
+          {/* Main login page - handles all user types */}
           <Route path="/login" element={<Login />} />
+          
+          {/* Setup page (if still needed) */}
           <Route path="/setup" element={<Setup />} />
+          
+          {/* Protected study flow routes */}
           <Route 
             path="/consent" 
             element={
@@ -88,6 +95,8 @@ function App() {
               </PrivateRoute>
             } 
           />
+          
+          {/* Admin dashboard - protected route */}
           <Route 
             path="/admin" 
             element={
@@ -96,6 +105,8 @@ function App() {
               </AdminRoute>
             } 
           />
+          
+          {/* Root and catch-all routes */}
           <Route path="/" element={<RootRedirect />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

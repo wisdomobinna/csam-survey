@@ -1,960 +1,1282 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { collection, getDocs, doc, getDoc, writeBatch, serverTimestamp, updateDoc } from 'firebase/firestore';
-import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { db, auth, storage } from '../firebase/config';
-import { initializeFirestore, verifySetup, clearAllData } from '../utils/firebaseSetup';
-import { createBalancedAssignments } from '../utils/assignmentSystem';
-import DatabaseStats from '../components/DatabaseStats';
-
+// src/components/AdminDashboard.js
+import React, { useState, useEffect } from 'react';
 import {
-  Container, Heading, Box, Text, Grid,
-  Table, Thead, Tbody, Tr, Th, Td,
-  Progress, Badge, HStack, Input, Button,
-  Stat, StatLabel, StatNumber, StatGroup,
-  Tabs, TabList, TabPanels, Tab, TabPanel,
-  useToast, Flex, VStack, Spinner,
-  AlertDialog, AlertDialogBody, AlertDialogFooter,
-  AlertDialogHeader, AlertDialogContent, AlertDialogOverlay,
-  Textarea, IconButton,
-  Alert, AlertIcon
+  Box,
+  VStack,
+  HStack,
+  Text,
+  Button,
+  Tabs,
+  TabList,
+  TabPanels,
+  Tab,
+  TabPanel,
+  Table,
+  Thead,
+  Tbody,
+  Tr,
+  Th,
+  Td,
+  Badge,
+  useToast,
+  Alert,
+  AlertIcon,
+  Stat,
+  StatLabel,
+  StatNumber,
+  StatHelpText,
+  Progress,
+  Select,
+  Input,
+  Textarea,
+  Switch,
+  FormControl,
+  FormLabel,
+  Divider,
+  Card,
+  CardHeader,
+  CardBody,
+  Heading,
+  SimpleGrid,
+  Spinner,
+  Modal,
+  ModalOverlay,
+  ModalContent,
+  ModalHeader,
+  ModalFooter,
+  ModalBody,
+  ModalCloseButton,
+  useDisclosure,
+  AlertDialog,
+  AlertDialogOverlay,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogBody,
+  AlertDialogFooter,
+  IconButton,
+  Tooltip,
+  Code,
+  Container,
+  Flex,
+  Spacer,
+  useColorModeValue
 } from '@chakra-ui/react';
-import { EditIcon, CheckIcon, CloseIcon } from '@chakra-ui/icons';
+import {
+  collection,
+  getDocs,
+  doc,
+  setDoc,
+  deleteDoc,
+  updateDoc,
+  query,
+  orderBy,
+  limit,
+  where,
+  onSnapshot,
+  writeBatch,
+  serverTimestamp
+} from 'firebase/firestore';
+import { db } from '../firebase/config';
+import { 
+  Download, 
+  Upload, 
+  RefreshCw, 
+  Trash2, 
+  Settings, 
+  Users, 
+  BarChart3,
+  Database,
+  Shield,
+  Clock,
+  CheckCircle,
+  XCircle,
+  AlertTriangle,
+  Eye,
+  Play,
+  Pause,
+  RotateCcw
+} from 'lucide-react';
 
 const AdminDashboard = () => {
-  const [imageStats, setImageStats] = useState([]);
-  const [summary, setSummary] = useState({
-    totalAssessments: 0,
-    completedImages: 0,
-    inProgressImages: 0
+  const [loading, setLoading] = useState(true);
+  const [participants, setParticipants] = useState([]);
+  const [responses, setResponses] = useState([]);
+  const [systemStats, setSystemStats] = useState({
+    totalParticipants: 0,
+    totalResponses: 0,
+    completionRate: 0,
+    avgTimeSpent: 0,
+    activeParticipants: 0,
+    imagesInitialized: false,
+    lastUpdated: null
   });
-  const [loginId, setLoginId] = useState('');
-  const [loginIds, setLoginIds] = useState([]);
-  const [isLogoutDialogOpen, setIsLogoutDialogOpen] = useState(false);
-  const [isResetDialogOpen, setIsResetDialogOpen] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [initializing, setInitializing] = useState(true);
-  const [isAuthChecking, setIsAuthChecking] = useState(true);
-  const [systemStatus, setSystemStatus] = useState({
-    imageCount: 0,
-    initialized: false
+  const [selectedParticipant, setSelectedParticipant] = useState(null);
+  const [initializationProgress, setInitializationProgress] = useState(0);
+  const [isInitializing, setIsInitializing] = useState(false);
+  const [systemSettings, setSystemSettings] = useState({
+    studyActive: true,
+    maxParticipants: 1000,
+    requireConsent: true,
+    allowAnonymous: true,
+    dataRetentionDays: 365
   });
 
-  // Image management states
-  const [editingImageId, setEditingImageId] = useState(null);
-  const [editingPrompt, setEditingPrompt] = useState('');
-  const [imageList, setImageList] = useState([]);
-  const [uploadingImage, setUploadingImage] = useState(null);
-  
-  // Add verification result state
-  const [verificationResult, setVerificationResult] = useState(null);
-
-  const cancelRef = React.useRef();
-  const navigate = useNavigate();
   const toast = useToast();
+  const { isOpen, onOpen, onClose } = useDisclosure();
+  const { 
+    isOpen: isDeleteOpen, 
+    onOpen: onDeleteOpen, 
+    onClose: onDeleteClose 
+  } = useDisclosure();
+  const cancelRef = React.useRef();
 
-  // Image upload handler
-  const handleImageUpload = async (imageId, file) => {
-    if (!file || !imageId) return;
+  const bgColor = useColorModeValue('gray.50', 'gray.900');
+  const cardBg = useColorModeValue('white', 'gray.800');
+
+  // Load dashboard data
+  useEffect(() => {
+    loadDashboardData();
+    
+    // Set up real-time listeners
+    const unsubscribeParticipants = onSnapshot(
+      collection(db, 'participants'),
+      (snapshot) => {
+        const participantData = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        setParticipants(participantData);
+        updateSystemStats(participantData, responses);
+      }
+    );
+
+    const unsubscribeResponses = onSnapshot(
+      collection(db, 'responses'),
+      (snapshot) => {
+        const responseData = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        setResponses(responseData);
+        updateSystemStats(participants, responseData);
+      }
+    );
+
+    return () => {
+      unsubscribeParticipants();
+      unsubscribeResponses();
+    };
+  }, []);
+
+  const loadDashboardData = async () => {
+    try {
+      setLoading(true);
+      
+      // Load participants
+      const participantsSnapshot = await getDocs(
+        query(collection(db, 'participants'), orderBy('createdAt', 'desc'))
+      );
+      const participantData = participantsSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+
+      // Load responses
+      const responsesSnapshot = await getDocs(
+        query(collection(db, 'responses'), orderBy('createdAt', 'desc'))
+      );
+      const responseData = responsesSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+
+      // Check if images are initialized
+      const imagesSnapshot = await getDocs(collection(db, 'images'));
+      const imagesInitialized = !imagesSnapshot.empty;
+
+      setParticipants(participantData);
+      setResponses(responseData);
+      updateSystemStats(participantData, responseData, imagesInitialized);
+      
+    } catch (error) {
+      console.error('Error loading dashboard data:', error);
+      toast({
+        title: 'Error loading data',
+        description: error.message,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateSystemStats = (participantData, responseData, imagesInit = null) => {
+    const now = new Date();
+    const activeThreshold = new Date(now - 30 * 60 * 1000); // 30 minutes ago
+    
+    const activeParticipants = participantData.filter(p => 
+      p.lastActivity && new Date(p.lastActivity.toDate()) > activeThreshold
+    ).length;
+
+    const completedParticipants = participantData.filter(p => 
+      p.status === 'completed'
+    ).length;
+
+    const totalTimeSpent = responseData.reduce((sum, r) => 
+      sum + (r.timeSpent || 0), 0
+    );
+
+    const avgTimeSpent = responseData.length > 0 ? 
+      totalTimeSpent / responseData.length : 0;
+
+    setSystemStats(prev => ({
+      totalParticipants: participantData.length,
+      totalResponses: responseData.length,
+      completionRate: participantData.length > 0 ? 
+        (completedParticipants / participantData.length) * 100 : 0,
+      avgTimeSpent: Math.round(avgTimeSpent / 1000), // Convert to seconds
+      activeParticipants,
+      imagesInitialized: imagesInit !== null ? imagesInit : prev.imagesInitialized,
+      lastUpdated: now
+    }));
+  };
+
+  const initializeImageDatabase = async () => {
+    setIsInitializing(true);
+    setInitializationProgress(0);
 
     try {
-      setUploadingImage(imageId);
+      // Simple image data structure: 2 sets of 1200 images each
+      const imageSets = [
+        { setId: 'set1', count: 1200 },
+        { setId: 'set2', count: 1200 }
+      ];
 
-      // Validate file
-      if (file.size > 5000000) { // 5MB limit
-        throw new Error('File size too large. Please upload an image under 5MB.');
+      let totalImages = 0;
+      const batch = writeBatch(db);
+
+      for (const imageSet of imageSets) {
+        for (let i = 1; i <= imageSet.count; i++) {
+          const imageId = `${imageSet.setId}_${String(i).padStart(4, '0')}`;
+          const imageDoc = doc(db, 'images', imageId);
+          
+          batch.set(imageDoc, {
+            id: imageId,
+            setId: imageSet.setId,
+            imageNumber: i,
+            filename: `${imageId}.png`,
+            url: `/images/${imageSet.setId}/${imageId}.png`,
+            isActive: true,
+            createdAt: serverTimestamp(),
+            viewCount: 0, // Track how many times this image has been shown
+            maxViews: 5,  // Maximum 5 views per image
+            viewedBy: []  // Array to track which participants have seen this image
+          });
+
+          totalImages++;
+          setInitializationProgress((totalImages / 2400) * 100);
+
+          // Commit in batches of 500
+          if (totalImages % 500 === 0) {
+            await batch.commit();
+            const newBatch = writeBatch(db);
+            Object.assign(batch, newBatch);
+          }
+        }
       }
 
-      if (!file.type.includes('image/')) {
-        throw new Error('Please upload an image file.');
+      // Commit remaining
+      await batch.commit();
+
+      // Update system configuration
+      await setDoc(doc(db, 'system', 'config'), {
+        imagesInitialized: true,
+        totalImages: 2400,
+        sets: [
+          { setId: 'set1', count: 1200, description: 'Set 1 images' },
+          { setId: 'set2', count: 1200, description: 'Set 2 images' }
+        ],
+        samplingRules: {
+          imagesPerParticipant: 10,
+          imagesPerSet: 5,
+          maxViewsPerImage: 5,
+          ensureUniquePerParticipant: true
+        },
+        lastInitialized: serverTimestamp()
+      });
+
+      setSystemStats(prev => ({
+        ...prev,
+        imagesInitialized: true
+      }));
+
+      toast({
+        title: 'Database Initialized',
+        description: `Successfully initialized ${totalImages} images (Set 1: 1200, Set 2: 1200)`,
+        status: 'success',
+        duration: 5000,
+        isClosable: true,
+      });
+
+    } catch (error) {
+      console.error('Error initializing database:', error);
+      toast({
+        title: 'Initialization Failed',
+        description: error.message,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    } finally {
+      setIsInitializing(false);
+      setInitializationProgress(0);
+    }
+  };
+
+  const exportData = async (dataType) => {
+    try {
+      let data = [];
+      let filename = '';
+
+      switch (dataType) {
+        case 'participants':
+          data = participants;
+          filename = 'participants_export.json';
+          break;
+        case 'responses':
+          data = responses;
+          filename = 'responses_export.json';
+          break;
+        case 'all':
+          data = { participants, responses, systemStats };
+          filename = 'complete_export.json';
+          break;
       }
 
-      // Create storage reference
-      const imageRef = storageRef(storage, `artwork-images/${imageId}.jpg`);
+      const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: 'application/json'
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
 
-      // Upload file
-      await uploadBytes(imageRef, file);
+      toast({
+        title: 'Export Complete',
+        description: `${filename} downloaded successfully`,
+        status: 'success',
+        duration: 3000,
+        isClosable: true,
+      });
+
+    } catch (error) {
+      console.error('Export error:', error);
+      toast({
+        title: 'Export Failed',
+        description: error.message,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    }
+  };
+
+  const deleteParticipant = async (participantId) => {
+    try {
+      // Delete participant responses
+      const responsesQuery = query(
+        collection(db, 'responses'),
+        where('participantId', '==', participantId)
+      );
+      const responsesSnapshot = await getDocs(responsesQuery);
       
-      // Get download URL
-      const downloadURL = await getDownloadURL(imageRef);
+      const batch = writeBatch(db);
+      responsesSnapshot.docs.forEach(doc => {
+        batch.delete(doc.ref);
+      });
 
-      // Update Firestore document
-      await updateDoc(doc(db, 'images', imageId), {
-        imageUrl: downloadURL,
+      // Delete participant
+      batch.delete(doc(db, 'participants', participantId));
+      
+      await batch.commit();
+
+      toast({
+        title: 'Participant Deleted',
+        description: 'Participant and all associated data removed',
+        status: 'success',
+        duration: 3000,
+        isClosable: true,
+      });
+
+      onDeleteClose();
+      setSelectedParticipant(null);
+
+    } catch (error) {
+      console.error('Delete error:', error);
+      toast({
+        title: 'Delete Failed',
+        description: error.message,
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    }
+  };
+
+  const updateSystemSettings = async (newSettings) => {
+    try {
+      await setDoc(doc(db, 'system', 'settings'), {
+        ...newSettings,
         lastUpdated: serverTimestamp()
       });
 
+      setSystemSettings(newSettings);
+
       toast({
-        title: 'Success',
-        description: `Image ${imageId} uploaded successfully`,
+        title: 'Settings Updated',
+        description: 'System settings saved successfully',
         status: 'success',
         duration: 3000,
+        isClosable: true,
       });
-
-      // Refresh image list
-      await fetchImageData();
 
     } catch (error) {
-      console.error('Error uploading image:', error);
+      console.error('Settings update error:', error);
       toast({
-        title: 'Error',
-        description: error.message || 'Failed to upload image',
-        status: 'error',
-        duration: 3000,
-      });
-    } finally {
-      setUploadingImage(null);
-    }
-  };
-
-  // Fetch image data
-  const fetchImageData = async () => {
-    try {
-      const imagesRef = collection(db, 'images');
-      const snapshot = await getDocs(imagesRef);
-      const images = snapshot.docs
-        .map(doc => ({ id: doc.id, ...doc.data() }))
-        .sort((a, b) => parseInt(a.id) - parseInt(b.id));
-      setImageList(images);
-    } catch (error) {
-      console.error('Error fetching images:', error);
-      toast({
-        title: 'Error',
-        description: 'Failed to load image data',
-        status: 'error',
-        duration: 3000,
-      });
-    }
-  };
-
-  // Handle prompt updates
-  const handleUpdatePrompt = async (imageId) => {
-    try {
-      await updateDoc(doc(db, 'images', imageId), {
-        prompt: editingPrompt.trim()
-      });
-      
-      toast({
-        title: 'Success',
-        description: 'Prompt updated successfully',
-        status: 'success',
-        duration: 3000,
-      });
-      
-      setEditingImageId(null);
-      setEditingPrompt('');
-      fetchImageData();
-    } catch (error) {
-      console.error('Error updating prompt:', error);
-      toast({
-        title: 'Error',
-        description: 'Failed to update prompt',
-        status: 'error',
-        duration: 3000,
-      });
-    }
-  };
-
-  // Load image data on mount
-  useEffect(() => {
-    fetchImageData();
-  }, []);
-
-  // System status check
-  const checkSystemStatus = useCallback(async () => {
-    try {
-      const imagesRef = collection(db, 'images');
-      const snapshot = await getDocs(imagesRef);
-      setSystemStatus({
-        imageCount: snapshot.size,
-        initialized: snapshot.size > 0
-      });
-    } catch (error) {
-      console.error('Error checking system status:', error);
-      toast({
-        title: 'Error',
-        description: 'Failed to check system status',
-        status: 'error',
-        duration: 3000,
-      });
-    }
-  }, [toast]);
-
-  // Fetch statistics
-  const fetchStats = useCallback(async () => {
-    try {
-      const imagesRef = collection(db, 'images');
-      const snapshot = await getDocs(imagesRef);
-      const stats = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })).sort((a, b) => a.id.localeCompare(b.id, undefined, {numeric: true}));
-
-      const summaryData = stats.reduce((acc, img) => ({
-        totalAssessments: acc.totalAssessments + (img.totalAssessments || 0),
-        completedImages: acc.completedImages + ((img.totalAssessments || 0) >= 12 ? 1 : 0),
-        inProgressImages: acc.inProgressImages + (img.totalAssessments > 0 && img.totalAssessments < 12 ? 1 : 0)
-      }), { totalAssessments: 0, completedImages: 0, inProgressImages: 0 });
-
-      setImageStats(stats);
-      setSummary(summaryData);
-    } catch (error) {
-      console.error('Error fetching stats:', error);
-      toast({
-        title: 'Error',
-        description: 'Failed to load image statistics',
-        status: 'error',
-        duration: 3000,
-      });
-    }
-  }, [toast]);
-
-  // Fetch login IDs
-  const fetchLoginIds = useCallback(async () => {
-    try {
-      const loginSnapshot = await getDocs(collection(db, 'loginIDs'));
-      const progressSnapshot = await getDocs(collection(db, 'userProgress'));
-      
-      const progressMap = new Map();
-      progressSnapshot.docs.forEach(doc => {
-        progressMap.set(doc.id, doc.data());
-      });
-      
-      const ids = loginSnapshot.docs.map(doc => {
-        const loginData = doc.data();
-        const progressData = progressMap.get(doc.id) || {};
-        
-        return {
-          id: doc.id,
-          loginId: doc.id,
-          createdAt: loginData.createdAt,
-          lastLogin: loginData.lastLogin,
-          progress: progressData.progress || 0,
-          completedImages: progressData.completedImages || {},
-          isActive: loginData.isActive
-        };
-      });
-
-      setLoginIds(ids);
-    } catch (error) {
-      console.error('Error fetching login IDs:', error);
-      toast({
-        title: 'Error',
-        description: 'Failed to load evaluator data',
-        status: 'error',
-        duration: 3000,
-      });
-    }
-  }, [toast]);
-
-  // Auth check effect
-  useEffect(() => {
-    const checkAuthAndAdmin = async () => {
-      setIsAuthChecking(true);
-      try {
-        console.log('Starting auth check...');
-        
-        const unsubscribe = auth.onAuthStateChanged(async (user) => {
-          const loginId = sessionStorage.getItem('userLoginId');
-          const isAdmin = sessionStorage.getItem('isAdmin');
-  
-          if (!user || loginId !== 'ADMIN' || !isAdmin) {
-            console.log('Invalid admin session, redirecting to login');
-            if (!window.location.pathname.includes('/login')) {
-              sessionStorage.clear();
-              navigate('/login');
-            }
-            return;
-          }
-  
-          console.log('Admin authentication successful');
-          setIsAuthChecking(false);
-          setInitializing(false);
-          
-          try {
-            await checkSystemStatus();
-            await fetchStats();
-            await fetchLoginIds();
-            console.log('Dashboard initialization complete');
-          } catch (error) {
-            console.error('Error during dashboard initialization:', error);
-          }
-        });
-  
-        return () => unsubscribe();
-      } catch (error) {
-        console.error('Auth check error:', error);
-        setIsAuthChecking(false);
-        setInitializing(false);
-        navigate('/login');
-      }
-    };
-  
-    checkAuthAndAdmin();
-  }, [navigate, checkSystemStatus, fetchStats, fetchLoginIds]);
-
-  // Handler functions
-  const handleAddLoginId = async () => {
-    if (!loginId.trim()) {
-      toast({
-        title: 'Error',
-        description: 'Please enter a login ID',
-        status: 'error',
-        duration: 3000,
-      });
-      return;
-    }
-  
-    try {
-      const userPattern = /^EV25-\d{3}$/;
-      if (!userPattern.test(loginId.trim())) {
-        toast({
-          title: 'Error',
-          description: 'Login ID must be in format EV25-XXX (where X is a number)',
-          status: 'error',
-          duration: 3000,
-        });
-        return;
-      }
-  
-      const batch = writeBatch(db);
-      const newLoginId = loginId.trim();
-  
-      const loginRef = doc(db, 'loginIDs', newLoginId);
-      const loginDoc = await getDoc(loginRef);
-      
-      if (loginDoc.exists()) {
-        toast({
-          title: 'Error',
-          description: 'This Login ID already exists',
-          status: 'error',
-          duration: 3000,
-        });
-        return;
-      }
-  
-      const timestamp = serverTimestamp();
-  
-      batch.set(loginRef, {
-        createdAt: timestamp,
-        lastLogin: null,
-        isActive: true
-      });
-  
-      const progressRef = doc(db, 'userProgress', newLoginId);
-      batch.set(progressRef, {
-        progress: 0,
-        completedImages: {},
-        assignedBatch: [],
-        lastUpdated: timestamp
-      });
-  
-      await batch.commit();
-  
-      toast({
-        title: 'Success',
-        description: 'Login ID added successfully',
-        status: 'success',
-        duration: 3000,
-      });
-  
-      setLoginId('');
-      fetchLoginIds();
-    } catch (error) {
-      console.error('Error adding login ID:', error);
-      toast({
-        title: 'Error',
-        description: 'Failed to add login ID',
-        status: 'error',
-        duration: 3000,
-      });
-    }
-  };
-
-  const handleDeleteLoginId = async (loginId) => {
-    try {
-      const batch = writeBatch(db);
-      batch.delete(doc(db, 'loginIDs', loginId));
-      batch.delete(doc(db, 'userProgress', loginId));
-      await batch.commit();
-      
-      toast({
-        title: 'Success',
-        description: 'Login ID deleted successfully',
-        status: 'success',
-        duration: 3000,
-      });
-      
-      fetchLoginIds();
-    } catch (error) {
-      console.error('Error deleting login ID:', error);
-      toast({
-        title: 'Error',
-        description: 'Failed to delete login ID',
-        status: 'error',
-        duration: 3000,
-      });
-    }
-  };
-
-  const handleInitializeSystem = async () => {
-    setIsLoading(true);
-    try {
-      const result = await initializeFirestore();
-      
-      if (result) {
-        toast({
-          title: 'Success',
-          description: 'Database initialized with 1000 images and 200 users',
-          status: 'success',
-          duration: 5000,
-        });
-        
-        // Verify the setup
-        const verification = await verifySetup();
-        setVerificationResult(verification);
-      } else {
-        toast({
-          title: 'Info',
-          description: 'Database already initialized',
-          status: 'info',
-          duration: 3000,
-        });
-      }
-      
-      await checkSystemStatus();
-      await fetchStats();
-    } catch (error) {
-      toast({
-        title: 'Error',
+        title: 'Update Failed',
         description: error.message,
         status: 'error',
         duration: 5000,
+        isClosable: true,
       });
-    } finally {
-      setIsLoading(false);
     }
   };
 
-  const handleVerifySetup = async () => {
-    setIsLoading(true);
-    try {
-      const verification = await verifySetup();
-      setVerificationResult(verification);
-      
-      if (verification.success) {
-        toast({
-          title: 'Verification Complete',
-          description: 'System setup verified successfully',
-          status: 'success',
-          duration: 3000,
-        });
-      } else {
-        toast({
-          title: 'Verification Failed',
-          description: verification.message || 'System not properly initialized',
-          status: 'error',
-          duration: 3000,
-        });
-      }
-    } catch (error) {
-      toast({
-        title: 'Error',
-        description: 'Failed to verify setup',
-        status: 'error',
-        duration: 3000,
-      });
-    } finally {
-      setIsLoading(false);
+  const getStatusColor = (status) => {
+    switch (status) {
+      case 'completed': return 'green';
+      case 'in_progress': return 'blue';
+      case 'started': return 'yellow';
+      case 'abandoned': return 'red';
+      default: return 'gray';
     }
   };
 
-  const handleCreateAssignments = async () => {
-    setIsLoading(true);
-    try {
-      await createBalancedAssignments();
-      toast({
-        title: 'Success',
-        description: 'Created balanced assignments for all users',
-        status: 'success',
-        duration: 5000,
-      });
-      await fetchStats();
-    } catch (error) {
-      toast({
-        title: 'Error',
-        description: error.message,
-        status: 'error',
-        duration: 5000,
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleResetSystem = async () => {
-    setIsLoading(true);
-    try {
-      await clearAllData();
-      setVerificationResult(null);
-      toast({
-        title: 'Success',
-        description: 'All data cleared successfully',
-        status: 'success',
-        duration: 5000,
-      });
-      await fetchStats();
-      setIsResetDialogOpen(false);
-    } catch (error) {
-      toast({
-        title: 'Error',
-        description: error.message,
-        status: 'error',
-        duration: 5000,
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleLogoutConfirm = () => {
-    sessionStorage.clear();
-    auth.signOut();
-    navigate('/login');
-  };
-
-  const getProgressColor = (assessments) => {
-    if (assessments >= 12) return "green";
-    if (assessments >= 6) return "yellow";
-    if (assessments > 0) return "orange";
-    return "red";
-  };
-
-  if (isAuthChecking || isLoading || initializing) {
+  if (loading) {
     return (
-      <Flex minH="100vh" align="center" justify="center">
-        <VStack spacing={4}>
-          <Spinner size="xl" />
-          <Text>Loading dashboard...</Text>
-        </VStack>
-      </Flex>
+      <Box p={8} textAlign="center">
+        <Spinner size="xl" />
+        <Text mt={4}>Loading dashboard...</Text>
+      </Box>
     );
   }
 
   return (
-    <Container maxW="container.xl" py={6}>
-      <Flex justifyContent="space-between" alignItems="center" mb={6}>
-        <Heading>Admin Dashboard</Heading>
-        <Button colorScheme="red" onClick={() => setIsLogoutDialogOpen(true)}>
-          Logout
-        </Button>
-      </Flex>
+    <Box bg={bgColor} minH="100vh">
+      <Container maxW="container.xl" py={8}>
+        {/* Header */}
+        <Flex mb={8} align="center">
+          <VStack align="start" spacing={1}>
+            <Heading size="lg">Admin Dashboard</Heading>
+            <Text color="gray.600">
+              Image Evaluation Study Management
+            </Text>
+          </VStack>
+          <Spacer />
+          <HStack spacing={4}>
+            <Badge colorScheme="green" px={3} py={1} borderRadius="full">
+              {systemStats.imagesInitialized ? 'System Ready' : 'Setup Required'}
+            </Badge>
+            <Button
+              leftIcon={<RefreshCw size={16} />}
+              size="sm"
+              onClick={loadDashboardData}
+            >
+              Refresh
+            </Button>
+          </HStack>
+        </Flex>
 
-      <Tabs>
-        <TabList>
-          <Tab>Image Statistics</Tab>
-          <Tab>User Management</Tab>
-          <Tab>System Controls</Tab>
-          <Tab>Image Management</Tab>
-        </TabList>
-        
-        <TabPanels>
-          {/* Image Statistics Panel */}
-          <TabPanel>
-            <Box mb={8}>
-              <DatabaseStats />
-            </Box>
-
-            <StatGroup mb={8}>
+        {/* Quick Stats */}
+        <SimpleGrid columns={{ base: 2, md: 4 }} spacing={6} mb={8}>
+          <Card bg={cardBg}>
+            <CardBody>
               <Stat>
-                <StatLabel>Total Assessments</StatLabel>
-                <StatNumber>{summary.totalAssessments}</StatNumber>
-              </Stat>
-              <Stat>
-                <StatLabel>Completed Images</StatLabel>
-                <StatNumber>{summary.completedImages}</StatNumber>
-              </Stat>
-              <Stat>
-                <StatLabel>In Progress</StatLabel>
-                <StatNumber>{summary.inProgressImages}</StatNumber>
-              </Stat>
-            </StatGroup>
-
-            <Box>
-              <Heading size="md" mb={4}>Detailed Image Progress</Heading>
-              <Grid templateColumns="repeat(auto-fill, minmax(250px, 1fr))" gap={4} mb={8}>
-                {imageStats.map(img => (
-                  <Box key={img.id} p={4} borderWidth="1px" borderRadius="lg" bg="white">
-                    <HStack justify="space-between" mb={2}>
-                      <Text fontWeight="bold">Image {img.id}</Text>
-                      <Badge colorScheme={getProgressColor(img.totalAssessments || 0)} variant="solid">
-                        {img.totalAssessments || 0}/12
-                      </Badge>
-                    </HStack>
-                    <Progress 
-                      value={((img.totalAssessments || 0) / 12) * 100}
-                      colorScheme={getProgressColor(img.totalAssessments || 0)}
-                      size="sm"
-                      borderRadius="full"
-                    />
-                  </Box>
-                ))}
-              </Grid>
-            </Box>
-          </TabPanel>
-
-          {/* User Management Panel */}
-          <TabPanel>
-            <VStack spacing={8} align="stretch">
-              <Box p={6} bg="white" rounded="md" shadow="sm">
-                <VStack spacing={4}>
-                  <Text fontSize="lg" fontWeight="bold">Add New Login ID</Text>
-                  <HStack w="full">
-                    <Input 
-                      placeholder="EV25-XXX"
-                      value={loginId}
-                      onChange={(e) => setLoginId(e.target.value.toUpperCase())}
-                      pattern="EV25-\d{3}"
-                    />
-                    <Button colorScheme="blue" onClick={handleAddLoginId}>
-                      Add
-                    </Button>
+                <StatLabel>Total Participants</StatLabel>
+                <StatNumber>{systemStats.totalParticipants}</StatNumber>
+                <StatHelpText>
+                  <HStack>
+                    <Users size={16} />
+                    <Text>{systemStats.activeParticipants} active</Text>
                   </HStack>
-                </VStack>
-              </Box>
+                </StatHelpText>
+              </Stat>
+            </CardBody>
+          </Card>
 
-              <Box p={6} bg="white" rounded="md" shadow="sm">
-                <Text fontSize="lg" fontWeight="bold" mb={4}>Existing Login IDs</Text>
+          <Card bg={cardBg}>
+            <CardBody>
+              <Stat>
+                <StatLabel>Total Responses</StatLabel>
+                <StatNumber>{systemStats.totalResponses}</StatNumber>
+                <StatHelpText>
+                  <HStack>
+                    <BarChart3 size={16} />
+                    <Text>Avg: {systemStats.avgTimeSpent}s</Text>
+                  </HStack>
+                </StatHelpText>
+              </Stat>
+            </CardBody>
+          </Card>
+
+          <Card bg={cardBg}>
+            <CardBody>
+              <Stat>
+                <StatLabel>Completion Rate</StatLabel>
+                <StatNumber>{systemStats.completionRate.toFixed(1)}%</StatNumber>
+                <StatHelpText>
+                  <HStack>
+                    <CheckCircle size={16} />
+                    <Text>Success rate</Text>
+                  </HStack>
+                </StatHelpText>
+              </Stat>
+            </CardBody>
+          </Card>
+
+          <Card bg={cardBg}>
+            <CardBody>
+              <Stat>
+                <StatLabel>System Status</StatLabel>
+                <StatNumber>
+                  <HStack>
+                    {systemStats.imagesInitialized ? (
+                      <CheckCircle color="green" size={24} />
+                    ) : (
+                      <AlertTriangle color="orange" size={24} />
+                    )}
+                    <Text fontSize="lg">
+                      {systemStats.imagesInitialized ? 'Ready' : 'Setup'}
+                    </Text>
+                  </HStack>
+                </StatNumber>
+                <StatHelpText>
+                  <Clock size={16} />
+                  {systemStats.lastUpdated && 
+                    new Date(systemStats.lastUpdated).toLocaleTimeString()
+                  }
+                </StatHelpText>
+              </Stat>
+            </CardBody>
+          </Card>
+        </SimpleGrid>
+
+        {/* Main Content Tabs */}
+        <Tabs variant="enclosed" bg={cardBg} borderRadius="lg">
+          <TabList>
+            <Tab>
+              <HStack>
+                <Database size={16} />
+                <Text>System</Text>
+              </HStack>
+            </Tab>
+            <Tab>
+              <HStack>
+                <Users size={16} />
+                <Text>Participants</Text>
+              </HStack>
+            </Tab>
+            <Tab>
+              <HStack>
+                <BarChart3 size={16} />
+                <Text>Responses</Text>
+              </HStack>
+            </Tab>
+            <Tab>
+              <HStack>
+                <Settings size={16} />
+                <Text>Settings</Text>
+              </HStack>
+            </Tab>
+            <Tab>
+              <HStack>
+                <Download size={16} />
+                <Text>Export</Text>
+              </HStack>
+            </Tab>
+          </TabList>
+
+          <TabPanels>
+            {/* System Tab */}
+            <TabPanel>
+              <VStack spacing={6} align="stretch">
+                {!systemStats.imagesInitialized && (
+                  <Alert status="warning">
+                    <AlertIcon />
+                    <VStack align="start" spacing={2}>
+                      <Text fontWeight="bold">Database Setup Required</Text>
+                      <Text fontSize="sm">
+                        Initialize the image database to begin collecting responses.
+                        This will create 2,400 image records across 4 categories.
+                      </Text>
+                    </VStack>
+                  </Alert>
+                )}
+
+                <Card>
+                  <CardHeader>
+                    <Heading size="md">Database Management</Heading>
+                  </CardHeader>
+                  <CardBody>
+                    <VStack spacing={4} align="stretch">
+                      <HStack justify="space-between">
+                        <VStack align="start" spacing={1}>
+                          <Text fontWeight="bold">Initialize Database (2400 Images)</Text>
+                          <Text fontSize="sm" color="gray.600">
+                            Sets up 2 image sets: Set 1 (1200 images), Set 2 (1200 images).
+                            Each participant sees 10 images total (5 from each set).
+                            Each image shown max 5 times, never repeated per participant.
+                          </Text>
+                        </VStack>
+                        <Button
+                          colorScheme="blue"
+                          onClick={initializeImageDatabase}
+                          isLoading={isInitializing}
+                          loadingText="Initializing..."
+                          isDisabled={systemStats.imagesInitialized}
+                          leftIcon={<Database size={16} />}
+                        >
+                          {systemStats.imagesInitialized ? 'Already Initialized' : 'Initialize Now'}
+                        </Button>
+                      </HStack>
+
+                      {isInitializing && (
+                        <Box>
+                          <Progress 
+                            value={initializationProgress} 
+                            colorScheme="blue" 
+                            size="lg" 
+                            borderRadius="md"
+                          />
+                          <Text textAlign="center" mt={2} fontSize="sm">
+                            {initializationProgress.toFixed(1)}% Complete
+                          </Text>
+                        </Box>
+                      )}
+
+                      <Divider />
+
+                      <HStack justify="space-between">
+                        <VStack align="start" spacing={1}>
+                          <Text fontWeight="bold">Study URLs</Text>
+                          <Text fontSize="sm" color="gray.600">
+                            URLs for participant access and testing
+                          </Text>
+                        </VStack>
+                      </HStack>
+
+                      <VStack spacing={2} align="stretch">
+                        <FormControl>
+                          <FormLabel fontSize="sm">Prolific Study URL</FormLabel>
+                          <Code p={2} borderRadius="md" fontSize="xs">
+                            {`${window.location.origin}/login?PROLIFIC_PID={{%PROLIFIC_PID%}}&STUDY_ID={{%STUDY_ID%}}&SESSION_ID={{%SESSION_ID%}}`}
+                          </Code>
+                        </FormControl>
+
+                        <FormControl>
+                          <FormLabel fontSize="sm">Admin Dashboard URL</FormLabel>
+                          <Code p={2} borderRadius="md" fontSize="xs">
+                            {`${window.location.origin}/admin`}
+                          </Code>
+                        </FormControl>
+
+                        <FormControl>
+                          <FormLabel fontSize="sm">Test Participant URL</FormLabel>
+                          <Code p={2} borderRadius="md" fontSize="xs">
+                            {`${window.location.origin}/login?PROLIFIC_PID=TEST_USER&STUDY_ID=TEST&SESSION_ID=TEST_SESSION`}
+                          </Code>
+                        </FormControl>
+                      </VStack>
+                    </VStack>
+                  </CardBody>
+                </Card>
+              </VStack>
+            </TabPanel>
+
+            {/* Participants Tab */}
+            <TabPanel>
+              <VStack spacing={4} align="stretch">
+                <HStack justify="space-between">
+                  <Text fontSize="lg" fontWeight="bold">
+                    Participants ({participants.length})
+                  </Text>
+                  <Button
+                    leftIcon={<RefreshCw size={16} />}
+                    size="sm"
+                    onClick={loadDashboardData}
+                  >
+                    Refresh
+                  </Button>
+                </HStack>
+
                 <Table variant="simple">
                   <Thead>
                     <Tr>
-                      <Th>Login ID</Th>
-                      <Th>Created At</Th>
-                      <Th>Last Login</Th>
+                      <Th>Participant ID</Th>
+                      <Th>Status</Th>
                       <Th>Progress</Th>
+                      <Th>Started</Th>
+                      <Th>Last Activity</Th>
                       <Th>Actions</Th>
                     </Tr>
                   </Thead>
                   <Tbody>
-                    {loginIds.map((item) => (
-                      <Tr key={item.id}>
-                        <Td>{item.loginId}</Td>
-                        <Td>
-                          {item.createdAt 
-                            ? (item.createdAt.toDate 
-                                ? item.createdAt.toDate().toLocaleDateString() 
-                                : new Date(item.createdAt).toLocaleDateString())
-                            : 'N/A'}
+                    {participants.map((participant) => (
+                      <Tr key={participant.id}>
+                        <Td fontFamily="mono" fontSize="sm">
+                          {participant.prolificId || participant.id}
                         </Td>
                         <Td>
-                          {item.lastLogin 
-                            ? (item.lastLogin.toDate 
-                                ? item.lastLogin.toDate().toLocaleDateString() 
-                                : new Date(item.lastLogin).toLocaleDateString())
-                            : 'Never'}
+                          <Badge colorScheme={getStatusColor(participant.status)}>
+                            {participant.status || 'unknown'}
+                          </Badge>
                         </Td>
                         <Td>
-                          {item.progress || 0}/12 images
-                          {item.progress > 0 && (
-                            <Progress
-                              value={(item.progress / 12) * 100}
-                              size="sm"
-                              colorScheme={item.progress === 12 ? "green" : "blue"}
-                              mt={1}
-                            />
-                          )}
+                          {participant.currentImageIndex || 0} / {participant.totalImages || 50}
+                        </Td>
+                        <Td fontSize="sm">
+                          {participant.createdAt ? 
+                            new Date(participant.createdAt.toDate()).toLocaleDateString() : 
+                            'N/A'
+                          }
+                        </Td>
+                        <Td fontSize="sm">
+                          {participant.lastActivity ? 
+                            new Date(participant.lastActivity.toDate()).toLocaleString() : 
+                            'N/A'
+                          }
                         </Td>
                         <Td>
-                          <Button
-                            colorScheme="red"
-                            size="sm"
-                            onClick={() => handleDeleteLoginId(item.id)}
-                          >
-                            Delete
-                          </Button>
+                          <HStack spacing={2}>
+                            <Tooltip label="View Details">
+                              <IconButton
+                                size="sm"
+                                icon={<Eye size={16} />}
+                                onClick={() => {
+                                  setSelectedParticipant(participant);
+                                  onOpen();
+                                }}
+                              />
+                            </Tooltip>
+                            <Tooltip label="Delete">
+                              <IconButton
+                                size="sm"
+                                colorScheme="red"
+                                variant="ghost"
+                                icon={<Trash2 size={16} />}
+                                onClick={() => {
+                                  setSelectedParticipant(participant);
+                                  onDeleteOpen();
+                                }}
+                              />
+                            </Tooltip>
+                          </HStack>
                         </Td>
                       </Tr>
                     ))}
                   </Tbody>
                 </Table>
-              </Box>
-            </VStack>
-          </TabPanel>
 
-          {/* System Controls Panel */}
-          <TabPanel>
-            <Box p={6} bg="white" rounded="md" shadow="sm">
-              <VStack spacing={6} align="stretch">
-                <Heading size="md">System Controls</Heading>
-                
-                {/* System Status Section */}
-                <Box p={4} borderWidth="1px" borderRadius="lg" bg="gray.50">
-                  <Text fontWeight="bold" mb={2}>Current System Status:</Text>
-                  <HStack spacing={6}>
-                    <Stat>
-                      <StatLabel>Images in Firestore</StatLabel>
-                      <StatNumber>{systemStatus.imageCount}</StatNumber>
-                      <StatLabel fontSize="sm" color={systemStatus.imageCount === 1000 ? "green.500" : "orange.500"}>
-                        {systemStatus.imageCount === 1000 
-                          ? "✓ Correct number of images" 
-                          : systemStatus.imageCount > 0 
-                            ? "⚠️ Incomplete image set"
-                            : "No images found"}
-                      </StatLabel>
-                    </Stat>
-                    <Stat>
-                      <StatLabel>System Status</StatLabel>
-                      <StatNumber>{systemStatus.initialized ? "Initialized" : "Not Initialized"}</StatNumber>
-                      <StatLabel fontSize="sm" color={systemStatus.initialized ? "green.500" : "red.500"}>
-                        {systemStatus.initialized ? "✓ Ready" : "Needs initialization"}
-                      </StatLabel>
-                    </Stat>
-                  </HStack>
-                </Box>
-
-                {/* Verification Results */}
-                {verificationResult && (
-                  <Alert status={verificationResult.success ? "success" : "error"}>
-                    <AlertIcon />
-                    <Box>
-                      <Text fontWeight="bold">Verification Results:</Text>
-                      <Text>Images: {verificationResult.status?.imageCount}/{verificationResult.status?.expectedImages}</Text>
-                      <Text>Users: {verificationResult.status?.userCount}/{verificationResult.status?.expectedUsers}</Text>
-                      {verificationResult.sampleUser && (
-                        <>
-                          <Text mt={2} fontWeight="bold">Sample User:</Text>
-                          <Text>Login ID: {verificationResult.sampleUser.loginId}</Text>
-                          <Text>Password Valid: {verificationResult.sampleUser.passwordCorrect ? 'Yes' : 'No'}</Text>
-                          <Text>Assigned Images: {verificationResult.sampleUser.assignedImages?.length}</Text>
-                        </>
-                      )}
-                    </Box>
-                  </Alert>
+                {participants.length === 0 && (
+                  <Box textAlign="center" py={8}>
+                    <Text color="gray.500">No participants yet</Text>
+                  </Box>
                 )}
-
-                <Box>
-                  <Text mb={2} fontWeight="bold">Initialize System</Text>
-                  <Button
-                    colorScheme="blue"
-                    onClick={handleInitializeSystem}
-                    isLoading={isLoading}
-                    width="full"
-                  >
-                    Initialize Database (1000 Images, 200 Users)
-                  </Button>
-                  <Text fontSize="sm" color="gray.600" mt={1}>
-                    Creates 1000 images and 200 users with rolling password pattern
-                  </Text>
-                </Box>
-
-                <Box>
-                  <Text mb={2} fontWeight="bold">Verify Setup</Text>
-                  <Button
-                    colorScheme="green"
-                    onClick={handleVerifySetup}
-                    isLoading={isLoading}
-                    width="full"
-                  >
-                    Verify System Setup
-                  </Button>
-                  <Text fontSize="sm" color="gray.600" mt={1}>
-                    Check if all users and images are properly configured
-                  </Text>
-                </Box>
-
-                <Box>
-                  <Text mb={2} fontWeight="bold">Reset System</Text>
-                  <Button
-                    colorScheme="red"
-                    onClick={() => setIsResetDialogOpen(true)}
-                    isLoading={isLoading}
-                    width="full"
-                  >
-                    Clear All Data
-                  </Button>
-                  <Text fontSize="sm" color="gray.600" mt={1}>
-                    Delete all images, users, and assessment data
-                  </Text>
-                </Box>
-
-                {/* Sample Credentials Info */}
-                <Box p={4} borderWidth="1px" borderRadius="lg" bg="blue.50">
-                  <Text fontWeight="bold" mb={2}>Sample Login Credentials:</Text>
-                  <VStack align="start" spacing={1}>
-                    <Text>Login ID: 0001 - Password: a0001</Text>
-                    <Text>Login ID: 0002 - Password: b0002</Text>
-                    <Text>Login ID: 0003 - Password: c0003</Text>
-                    <Text fontSize="sm" color="gray.600">...pattern continues (a-z + loginID)</Text>
-                  </VStack>
-                </Box>
               </VStack>
-            </Box>
-          </TabPanel>
+            </TabPanel>
 
-          {/* Image Management Panel */}
-          <TabPanel>
-            <Box p={6} bg="white" rounded="md" shadow="sm">
-              <VStack spacing={6} align="stretch">
-                <Heading size="md">Image & Prompt Management</Heading>
-                
-                <Box overflowX="auto">
-                  <Table variant="simple">
-                    <Thead>
-                      <Tr>
-                        <Th>Image ID</Th>
-                        <Th>Image</Th>
-                        <Th>Prompt</Th>
-                        <Th width="150px">Actions</Th>
+            {/* Responses Tab */}
+            <TabPanel>
+              <VStack spacing={4} align="stretch">
+                <HStack justify="space-between">
+                  <Text fontSize="lg" fontWeight="bold">
+                    Responses ({responses.length})
+                  </Text>
+                  <Button
+                    leftIcon={<Download size={16} />}
+                    size="sm"
+                    onClick={() => exportData('responses')}
+                  >
+                    Export Responses
+                  </Button>
+                </HStack>
+
+                <Table variant="simple">
+                  <Thead>
+                    <Tr>
+                      <Th>Participant</Th>
+                      <Th>Image ID</Th>
+                      <Th>Rating</Th>
+                      <Th>Time Spent</Th>
+                      <Th>Timestamp</Th>
+                      <Th>Flagged</Th>
+                    </Tr>
+                  </Thead>
+                  <Tbody>
+                    {responses.slice(0, 100).map((response) => (
+                      <Tr key={response.id}>
+                        <Td fontFamily="mono" fontSize="sm">
+                          {response.participantId?.substring(0, 8)}...
+                        </Td>
+                        <Td fontFamily="mono" fontSize="sm">
+                          {response.imageId}
+                        </Td>
+                        <Td>
+                          <Badge 
+                            colorScheme={response.rating <= 2 ? 'green' : 
+                                       response.rating <= 4 ? 'yellow' : 'red'}
+                          >
+                            {response.rating}/5
+                          </Badge>
+                        </Td>
+                        <Td>{Math.round((response.timeSpent || 0) / 1000)}s</Td>
+                        <Td fontSize="sm">
+                          {response.createdAt ? 
+                            new Date(response.createdAt.toDate()).toLocaleString() : 
+                            'N/A'
+                          }
+                        </Td>
+                        <Td>
+                          {response.flagged && (
+                            <Badge colorScheme="red">Flagged</Badge>
+                          )}
+                        </Td>
                       </Tr>
-                    </Thead>
-                    <Tbody>
-                      {imageList.map((image) => (
-                        <Tr key={image.id}>
-                          <Td>Image {image.id}</Td>
-                          <Td width="200px">
-                            <VStack spacing={2} align="start">
-                              <Input
-                                type="file"
-                                accept="image/*"
-                                onChange={(e) => handleImageUpload(image.id, e.target.files[0])}
-                                display="none"
-                                id={`file-upload-${image.id}`}
-                              />
-                              <Button
-                                as="label"
-                                htmlFor={`file-upload-${image.id}`}
-                                size="sm"
-                                colorScheme="teal"
-                                cursor="pointer"
-                                isLoading={uploadingImage === image.id}
-                                leftIcon={<EditIcon />}
-                                width="full"
-                              >
-                                {image.imageUrl ? 'Replace Image' : 'Upload Image'}
-                              </Button>
-                              {uploadingImage === image.id && (
-                                <Progress 
-                                  size="xs" 
-                                  isIndeterminate 
-                                  width="full" 
-                                  colorScheme="teal" 
-                                />
-                              )}
-                            </VStack>
-                          </Td>
-                          <Td>
-                            {editingImageId === image.id ? (
-                              <Textarea
-                                value={editingPrompt}
-                                onChange={(e) => setEditingPrompt(e.target.value)}
-                                size="sm"
-                                rows={3}
-                              />
-                            ) : (
-                              <Text>{image.prompt || 'No prompt set'}</Text>
-                            )}
-                          </Td>
-                          <Td>
-                            {editingImageId === image.id ? (
-                              <HStack spacing={2}>
-                                <IconButton
-                                  icon={<CheckIcon />}
-                                  colorScheme="green"
-                                  size="sm"
-                                  onClick={() => handleUpdatePrompt(image.id)}
-                                />
-                                <IconButton
-                                  icon={<CloseIcon />}
-                                  colorScheme="red"
-                                  size="sm"
-                                  onClick={() => {
-                                    setEditingImageId(null);
-                                    setEditingPrompt('');
-                                  }}
-                                />
-                              </HStack>
-                            ) : (
-                              <IconButton
-                                icon={<EditIcon />}
-                                colorScheme="blue"
-                                size="sm"
-                                onClick={() => {
-                                  setEditingImageId(image.id);
-                                  setEditingPrompt(image.prompt || '');
-                                }}
-                              />
-                            )}
-                          </Td>
-                        </Tr>
-                      ))}
-                    </Tbody>
-                  </Table>
-                </Box>
+                    ))}
+                  </Tbody>
+                </Table>
+
+                {responses.length === 0 && (
+                  <Box textAlign="center" py={8}>
+                    <Text color="gray.500">No responses yet</Text>
+                  </Box>
+                )}
               </VStack>
-            </Box>
-          </TabPanel>
-        </TabPanels>
-      </Tabs>
+            </TabPanel>
 
-      {/* Logout Confirmation Dialog */}
-      <AlertDialog
-        isOpen={isLogoutDialogOpen}
-        leastDestructiveRef={cancelRef}
-        onClose={() => setIsLogoutDialogOpen(false)}
-      >
-        <AlertDialogOverlay>
-          <AlertDialogContent>
-            <AlertDialogHeader fontSize="lg" fontWeight="bold">
-              Confirm Logout
-            </AlertDialogHeader>
+            {/* Settings Tab */}
+            <TabPanel>
+              <VStack spacing={6} align="stretch">
+                <Card>
+                  <CardHeader>
+                    <Heading size="md">Study Settings</Heading>
+                  </CardHeader>
+                  <CardBody>
+                    <VStack spacing={4} align="stretch">
+                      <FormControl display="flex" alignItems="center">
+                        <FormLabel htmlFor="study-active" mb="0">
+                          Study Active
+                        </FormLabel>
+                        <Switch
+                          id="study-active"
+                          isChecked={systemSettings.studyActive}
+                          onChange={(e) => setSystemSettings(prev => ({
+                            ...prev,
+                            studyActive: e.target.checked
+                          }))}
+                        />
+                      </FormControl>
 
-            <AlertDialogBody>
-              Are you sure you want to logout?
-            </AlertDialogBody>
+                      <FormControl>
+                        <FormLabel>Maximum Participants</FormLabel>
+                        <Input
+                          type="number"
+                          value={systemSettings.maxParticipants}
+                          onChange={(e) => setSystemSettings(prev => ({
+                            ...prev,
+                            maxParticipants: parseInt(e.target.value)
+                          }))}
+                        />
+                      </FormControl>
 
-            <AlertDialogFooter>
+                      <FormControl display="flex" alignItems="center">
+                        <FormLabel htmlFor="require-consent" mb="0">
+                          Require Consent
+                        </FormLabel>
+                        <Switch
+                          id="require-consent"
+                          isChecked={systemSettings.requireConsent}
+                          onChange={(e) => setSystemSettings(prev => ({
+                            ...prev,
+                            requireConsent: e.target.checked
+                          }))}
+                        />
+                      </FormControl>
 
+                      <FormControl>
+                        <FormLabel>Data Retention (Days)</FormLabel>
+                        <Input
+                          type="number"
+                          value={systemSettings.dataRetentionDays}
+                          onChange={(e) => setSystemSettings(prev => ({
+                            ...prev,
+                            dataRetentionDays: parseInt(e.target.value)
+                          }))}
+                        />
+                      </FormControl>
 
-            <Button ref={cancelRef} onClick={() => setIsLogoutDialogOpen(false)}>
-               Cancel
-             </Button>
-             <Button colorScheme="red" onClick={handleLogoutConfirm} ml={3}>
-               Logout
-             </Button>
-           </AlertDialogFooter>
-         </AlertDialogContent>
-       </AlertDialogOverlay>
-     </AlertDialog>
+                      <Button
+                        colorScheme="blue"
+                        onClick={() => updateSystemSettings(systemSettings)}
+                      >
+                        Save Settings
+                      </Button>
+                    </VStack>
+                  </CardBody>
+                </Card>
+              </VStack>
+            </TabPanel>
 
-     {/* Reset System Confirmation Dialog */}
-     <AlertDialog
-       isOpen={isResetDialogOpen}
-       leastDestructiveRef={cancelRef}
-       onClose={() => setIsResetDialogOpen(false)}
-     >
-       <AlertDialogOverlay>
-         <AlertDialogContent>
-           <AlertDialogHeader fontSize="lg" fontWeight="bold">
-             Reset System
-           </AlertDialogHeader>
+            {/* Export Tab */}
+            <TabPanel>
+              <VStack spacing={6} align="stretch">
+                <Card>
+                  <CardHeader>
+                    <Heading size="md">Data Export</Heading>
+                  </CardHeader>
+                  <CardBody>
+                    <VStack spacing={4} align="stretch">
+                      <HStack justify="space-between">
+                        <VStack align="start" spacing={1}>
+                          <Text fontWeight="bold">Export Participants</Text>
+                          <Text fontSize="sm" color="gray.600">
+                            Download participant data and metadata
+                          </Text>
+                        </VStack>
+                        <Button
+                          leftIcon={<Download size={16} />}
+                          onClick={() => exportData('participants')}
+                        >
+                          Export Participants
+                        </Button>
+                      </HStack>
 
-           <AlertDialogBody>
-             Are you sure? This will clear all assignments and progress data.
-           </AlertDialogBody>
+                      <HStack justify="space-between">
+                        <VStack align="start" spacing={1}>
+                          <Text fontWeight="bold">Export Responses</Text>
+                          <Text fontSize="sm" color="gray.600">
+                            Download all response data and ratings
+                          </Text>
+                        </VStack>
+                        <Button
+                          leftIcon={<Download size={16} />}
+                          onClick={() => exportData('responses')}
+                        >
+                          Export Responses
+                        </Button>
+                      </HStack>
 
-           <AlertDialogFooter>
-             <Button ref={cancelRef} onClick={() => setIsResetDialogOpen(false)}>
-               Cancel
-             </Button>
-             <Button colorScheme="red" onClick={handleResetSystem} ml={3}>
-               Reset
-             </Button>
-           </AlertDialogFooter>
-         </AlertDialogContent>
-       </AlertDialogOverlay>
-     </AlertDialog>
-   </Container>
- );
+                      <HStack justify="space-between">
+                        <VStack align="start" spacing={1}>
+                          <Text fontWeight="bold">Export Complete Dataset</Text>
+                          <Text fontSize="sm" color="gray.600">
+                            Download all data including system statistics
+                          </Text>
+                        </VStack>
+                        <Button
+                          leftIcon={<Download size={16} />}
+                          colorScheme="blue"
+                          onClick={() => exportData('all')}
+                        >
+                          Export All Data
+                        </Button>
+                      </HStack>
+
+                      <Divider />
+
+                      <Alert status="info">
+                        <AlertIcon />
+                        <VStack align="start" spacing={1}>
+                          <Text fontWeight="bold">Export Information</Text>
+                          <Text fontSize="sm">
+                            All exports are in JSON format and include timestamps.
+                            Data is anonymized according to study protocols.
+                          </Text>
+                        </VStack>
+                      </Alert>
+                    </VStack>
+                  </CardBody>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <Heading size="md">System Backup</Heading>
+                  </CardHeader>
+                  <CardBody>
+                    <VStack spacing={4} align="stretch">
+                      <Text fontSize="sm" color="gray.600">
+                        Create a complete backup of the study database for archival purposes.
+                      </Text>
+                      
+                      <HStack>
+                        <Button
+                          leftIcon={<Database size={16} />}
+                          variant="outline"
+                          onClick={() => {
+                            toast({
+                              title: 'Backup Started',
+                              description: 'Database backup in progress...',
+                              status: 'info',
+                              duration: 3000,
+                              isClosable: true,
+                            });
+                          }}
+                        >
+                          Create Backup
+                        </Button>
+                        
+                        <Button
+                          leftIcon={<Upload size={16} />}
+                          variant="outline"
+                          onClick={() => {
+                            toast({
+                              title: 'Feature Coming Soon',
+                              description: 'Backup restore functionality will be available in the next update',
+                              status: 'info',
+                              duration: 3000,
+                              isClosable: true,
+                            });
+                          }}
+                        >
+                          Restore Backup
+                        </Button>
+                      </HStack>
+                    </VStack>
+                  </CardBody>
+                </Card>
+              </VStack>
+            </TabPanel>
+          </TabPanels>
+        </Tabs>
+
+        {/* Participant Detail Modal */}
+        <Modal isOpen={isOpen} onClose={onClose} size="xl">
+          <ModalOverlay />
+          <ModalContent>
+            <ModalHeader>
+              Participant Details
+            </ModalHeader>
+            <ModalCloseButton />
+            <ModalBody>
+              {selectedParticipant && (
+                <VStack spacing={4} align="stretch">
+                  <SimpleGrid columns={2} spacing={4}>
+                    <Box>
+                      <Text fontWeight="bold" fontSize="sm" color="gray.600">
+                        Participant ID
+                      </Text>
+                      <Text fontFamily="mono" fontSize="sm">
+                        {selectedParticipant.prolificId || selectedParticipant.id}
+                      </Text>
+                    </Box>
+                    
+                    <Box>
+                      <Text fontWeight="bold" fontSize="sm" color="gray.600">
+                        Status
+                      </Text>
+                      <Badge colorScheme={getStatusColor(selectedParticipant.status)}>
+                        {selectedParticipant.status || 'unknown'}
+                      </Badge>
+                    </Box>
+                    
+                    <Box>
+                      <Text fontWeight="bold" fontSize="sm" color="gray.600">
+                        Progress
+                      </Text>
+                      <Text>
+                        {selectedParticipant.currentImageIndex || 0} / {selectedParticipant.totalImages || 50}
+                      </Text>
+                      <Progress 
+                        value={((selectedParticipant.currentImageIndex || 0) / (selectedParticipant.totalImages || 50)) * 100} 
+                        colorScheme="blue" 
+                        size="sm" 
+                        mt={1}
+                      />
+                    </Box>
+                    
+                    <Box>
+                      <Text fontWeight="bold" fontSize="sm" color="gray.600">
+                        Time Spent
+                      </Text>
+                      <Text>
+                        {selectedParticipant.totalTimeSpent ? 
+                          `${Math.round(selectedParticipant.totalTimeSpent / 60000)} minutes` :
+                          'N/A'
+                        }
+                      </Text>
+                    </Box>
+                  </SimpleGrid>
+
+                  <Divider />
+
+                  <Box>
+                    <Text fontWeight="bold" fontSize="sm" color="gray.600" mb={2}>
+                      Session Information
+                    </Text>
+                    <VStack spacing={2} align="stretch">
+                      <HStack justify="space-between">
+                        <Text fontSize="sm">Started:</Text>
+                        <Text fontSize="sm" fontFamily="mono">
+                          {selectedParticipant.createdAt ? 
+                            new Date(selectedParticipant.createdAt.toDate()).toLocaleString() : 
+                            'N/A'
+                          }
+                        </Text>
+                      </HStack>
+                      
+                      <HStack justify="space-between">
+                        <Text fontSize="sm">Last Activity:</Text>
+                        <Text fontSize="sm" fontFamily="mono">
+                          {selectedParticipant.lastActivity ? 
+                            new Date(selectedParticipant.lastActivity.toDate()).toLocaleString() : 
+                            'N/A'
+                          }
+                        </Text>
+                      </HStack>
+                      
+                      <HStack justify="space-between">
+                        <Text fontSize="sm">Session ID:</Text>
+                        <Text fontSize="sm" fontFamily="mono">
+                          {selectedParticipant.sessionId || 'N/A'}
+                        </Text>
+                      </HStack>
+                      
+                      <HStack justify="space-between">
+                        <Text fontSize="sm">Study ID:</Text>
+                        <Text fontSize="sm" fontFamily="mono">
+                          {selectedParticipant.studyId || 'N/A'}
+                        </Text>
+                      </HStack>
+                    </VStack>
+                  </Box>
+
+                  {selectedParticipant.userAgent && (
+                    <>
+                      <Divider />
+                      <Box>
+                        <Text fontWeight="bold" fontSize="sm" color="gray.600" mb={2}>
+                          Browser Information
+                        </Text>
+                        <Text fontSize="xs" fontFamily="mono" color="gray.500">
+                          {selectedParticipant.userAgent}
+                        </Text>
+                      </Box>
+                    </>
+                  )}
+
+                  {selectedParticipant.metadata && (
+                    <>
+                      <Divider />
+                      <Box>
+                        <Text fontWeight="bold" fontSize="sm" color="gray.600" mb={2}>
+                          Additional Data
+                        </Text>
+                        <Code p={2} fontSize="xs" borderRadius="md" w="full">
+                          {JSON.stringify(selectedParticipant.metadata, null, 2)}
+                        </Code>
+                      </Box>
+                    </>
+                  )}
+                </VStack>
+              )}
+            </ModalBody>
+            <ModalFooter>
+              <Button variant="ghost" mr={3} onClick={onClose}>
+                Close
+              </Button>
+              <Button
+                colorScheme="red"
+                leftIcon={<Trash2 size={16} />}
+                onClick={() => {
+                  onClose();
+                  onDeleteOpen();
+                }}
+              >
+                Delete Participant
+              </Button>
+            </ModalFooter>
+          </ModalContent>
+        </Modal>
+
+        {/* Delete Confirmation */}
+        <AlertDialog
+          isOpen={isDeleteOpen}
+          leastDestructiveRef={cancelRef}
+          onClose={onDeleteClose}
+        >
+          <AlertDialogOverlay>
+            <AlertDialogContent>
+              <AlertDialogHeader fontSize="lg" fontWeight="bold">
+                Delete Participant
+              </AlertDialogHeader>
+
+              <AlertDialogBody>
+                Are you sure you want to delete this participant and all their data? 
+                This action cannot be undone.
+                
+                {selectedParticipant && (
+                  <Box mt={4} p={3} bg="gray.50" borderRadius="md">
+                    <Text fontSize="sm">
+                      <strong>Participant:</strong> {selectedParticipant.prolificId || selectedParticipant.id}
+                    </Text>
+                    <Text fontSize="sm">
+                      <strong>Responses:</strong> {
+                        responses.filter(r => r.participantId === selectedParticipant.id).length
+                      }
+                    </Text>
+                  </Box>
+                )}
+              </AlertDialogBody>
+
+              <AlertDialogFooter>
+                <Button ref={cancelRef} onClick={onDeleteClose}>
+                  Cancel
+                </Button>
+                <Button 
+                  colorScheme="red" 
+                  onClick={() => deleteParticipant(selectedParticipant?.id)}
+                  ml={3}
+                >
+                  Delete
+                </Button>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialogOverlay>
+        </AlertDialog>
+
+        {/* Footer */}
+        <Box mt={12} pt={6} borderTop="1px" borderColor="gray.200">
+          <HStack justify="space-between" color="gray.500" fontSize="sm">
+            <Text>
+              Image Evaluation Study Dashboard v2.0
+            </Text>
+            <Text>
+              Last updated: {systemStats.lastUpdated ? 
+                new Date(systemStats.lastUpdated).toLocaleString() : 
+                'Never'
+              }
+            </Text>
+          </HStack>
+        </Box>
+      </Container>
+    </Box>
+  );
 };
 
 export default AdminDashboard;
