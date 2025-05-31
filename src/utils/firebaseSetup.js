@@ -1,490 +1,304 @@
-// src/utils/firebaseSetup.js - Updated for 2400 images in 2 sets
-import { collection, doc, writeBatch, getDocs, getDoc } from 'firebase/firestore';
-import { db } from '../firebase/config';
-import { assignImagesToUser as simpleAssignImagesToUser } from './simpleImageAssignment';
+// src/utils/firebaseSetup.js - Fixed image assignment for set1/set2 structure
+import { collection, doc, getDoc, setDoc, updateDoc, arrayUnion, runTransaction, getDocs, deleteDoc } from 'firebase/firestore';
+import { ref, getDownloadURL } from 'firebase/storage';
+import { db, storage } from '../firebase/config';
 
-// Define the new folder structure with 2 sets
-const IMAGE_SETS = {
-  'set1': { start: 1, end: 1200, folder: 'set1', description: 'CC3M Filtered Images' },
-  'set2': { start: 1201, end: 2400, folder: 'set2', description: 'CC3M Unfiltered Images' }
+// Track image assignment counts (max 5 per image)
+const MAX_ASSIGNMENTS_PER_IMAGE = 5;
+
+// Get available images from a set that haven't reached max assignments
+const getAvailableImagesFromSet = async (setName, count) => {
+  try {
+    console.log(`Getting ${count} available images from ${setName}`);
+    
+    const availableImages = [];
+    const setStart = setName === 'set1' ? 1 : 1201;
+    const setEnd = setName === 'set1' ? 1200 : 2400;
+    
+    // Get current assignment counts
+    const assignmentRef = doc(db, 'imageAssignments', setName);
+    const assignmentDoc = await getDoc(assignmentRef);
+    const assignments = assignmentDoc.exists() ? assignmentDoc.data() : {};
+    
+    // Create list of available images (those with < 5 assignments)
+    const imagePool = [];
+    for (let i = setStart; i <= setEnd; i++) {
+      const imageName = `${i}.png`;
+      const assignmentCount = assignments[imageName] || 0;
+      
+      if (assignmentCount < MAX_ASSIGNMENTS_PER_IMAGE) {
+        imagePool.push({
+          name: imageName,
+          set: setName,
+          path: `${setName}/${imageName}`,
+          assignmentCount
+        });
+      }
+    }
+    
+    console.log(`Found ${imagePool.length} available images in ${setName}`);
+    
+    if (imagePool.length < count) {
+      console.warn(`Only ${imagePool.length} available images in ${setName}, but ${count} requested`);
+    }
+    
+    // Randomly select images, prioritizing those with fewer assignments
+    const shuffled = imagePool.sort((a, b) => {
+      // First sort by assignment count (ascending), then randomly
+      if (a.assignmentCount !== b.assignmentCount) {
+        return a.assignmentCount - b.assignmentCount;
+      }
+      return Math.random() - 0.5;
+    });
+    
+    return shuffled.slice(0, count);
+  } catch (error) {
+    console.error(`Error getting available images from ${setName}:`, error);
+    throw error;
+  }
 };
 
-const TOTAL_IMAGES = 2400;
-const IMAGES_PER_USER = 10; // Each participant sees 10 images
-const VIEWS_PER_IMAGE = 5; // Each image seen 5 times
-const TOTAL_USERS_NEEDED = Math.ceil((TOTAL_IMAGES * VIEWS_PER_IMAGE) / IMAGES_PER_USER);
-
-export const initializeFirestore = async () => {
+// Update assignment counts for selected images
+const updateImageAssignments = async (selectedImages, userId) => {
   try {
-    // Check if already initialized
-    const imagesSnapshot = await getDocs(collection(db, 'images'));
-    const metadataRef = doc(db, 'systemMetadata', 'config');
-    const metadataDoc = await getDoc(metadataRef);
+    // Group images by set
+    const imagesBySet = {
+      set1: selectedImages.filter(img => img.set === 'set1'),
+      set2: selectedImages.filter(img => img.set === 'set2')
+    };
     
-    if (imagesSnapshot.size > 0 || metadataDoc.exists()) {
-      console.log('Database already initialized');
-      console.log(`Found ${imagesSnapshot.size} images in database`);
-      return false;
-    }
-
-    console.log('Starting Firestore initialization...');
-    console.log(`Creating ${TOTAL_IMAGES} images and preparing for ${TOTAL_USERS_NEEDED} users`);
-    
-    // Initialize in batches to avoid Firestore limits (500 operations per batch)
-    let batch = writeBatch(db);
-    let operationCount = 0;
-    let totalImagesCreated = 0;
-    
-    // Create images for each set
-    for (const [setKey, setInfo] of Object.entries(IMAGE_SETS)) {
-      console.log(`Processing ${setKey}: images ${setInfo.start}-${setInfo.end}`);
+    // Update assignment counts for each set
+    for (const [setName, images] of Object.entries(imagesBySet)) {
+      if (images.length === 0) continue;
       
-      for (let i = setInfo.start; i <= setInfo.end; i++) {
-        // Commit batch if approaching limit
-        if (operationCount >= 400) {
-          await batch.commit();
-          console.log(`Committed batch, processed ${totalImagesCreated} images so far...`);
-          batch = writeBatch(db);
-          operationCount = 0;
-        }
+      const assignmentRef = doc(db, 'imageAssignments', setName);
+      
+      await runTransaction(db, async (transaction) => {
+        const assignmentDoc = await transaction.get(assignmentRef);
+        const currentAssignments = assignmentDoc.exists() ? assignmentDoc.data() : {};
         
-        const imageId = `${i}`;
-        const docRef = doc(db, 'images', imageId);
+        // Update counts and track user assignments
+        const updates = { ...currentAssignments };
         
-        batch.set(docRef, {
-          id: imageId,
-          imageNumber: i,
-          set: setInfo.folder, // 'set1' or 'set2'
-          storagePath: `images/${setInfo.folder}/${i}.png`,
-          category: setKey,
-          viewCount: 0,
-          assignedCount: 0,
-          assignedUsers: [],
-          createdAt: new Date(),
-          fileExtension: '.png',
-          isActive: true,
-          description: setInfo.description
+        images.forEach(image => {
+          const imageName = image.name;
+          updates[imageName] = (updates[imageName] || 0) + 1;
+          
+          // Track which users were assigned this image
+          const userListKey = `${imageName}_users`;
+          if (!updates[userListKey]) {
+            updates[userListKey] = [];
+          }
+          updates[userListKey] = [...(updates[userListKey] || []), userId];
         });
         
-        operationCount++;
-        totalImagesCreated++;
-      }
+        transaction.set(assignmentRef, updates);
+      });
+      
+      console.log(`Updated assignments for ${images.length} images in ${setName}`);
     }
-    
-    // Create system metadata
-    if (operationCount >= 400) {
-      await batch.commit();
-      batch = writeBatch(db);
-      operationCount = 0;
-    }
-    
-    const metadataRef2 = doc(db, 'systemMetadata', 'config');
-    batch.set(metadataRef2, {
-      totalImages: TOTAL_IMAGES,
-      imagesPerUser: IMAGES_PER_USER,
-      viewsPerImage: VIEWS_PER_IMAGE,
-      totalUsersNeeded: TOTAL_USERS_NEEDED,
-      sets: IMAGE_SETS,
-      lastUpdated: new Date(),
-      initialized: true,
-      version: '2.0',
-      structure: '2_sets_2400_images'
-    });
-    
-    operationCount++;
-    
-    // Commit final operations
-    await batch.commit();
-    
-    console.log('Firestore initialization complete');
-    console.log(`✅ Created ${totalImagesCreated} images across ${Object.keys(IMAGE_SETS).length} sets`);
-    console.log(`✅ System ready for ${TOTAL_USERS_NEEDED} participants`);
-    console.log(`✅ Each participant will see ${IMAGES_PER_USER} images`);
-    console.log(`✅ Each image will be seen ${VIEWS_PER_IMAGE} times`);
-    
-    return true;
   } catch (error) {
-    console.error('Error initializing system:', error);
+    console.error('Error updating image assignments:', error);
     throw error;
   }
 };
 
-// Smart assignment algorithm for balanced distribution
+// Main function to assign images to a user
 export const assignImagesToUser = async (userId) => {
   try {
-    console.log(`🎯 Assigning ${IMAGES_PER_USER} images to user: ${userId}`);
+    console.log(`Assigning images to user: ${userId}`);
     
-    // Get all images and sort by assignment count (least assigned first)
-    const imagesRef = collection(db, 'images');
-    const imagesSnapshot = await getDocs(imagesRef);
+    // Get 5 images from each set
+    const [set1Images, set2Images] = await Promise.all([
+      getAvailableImagesFromSet('set1', 5),
+      getAvailableImagesFromSet('set2', 5)
+    ]);
     
-    if (imagesSnapshot.empty) {
-      throw new Error('No images found in database. Please initialize the system first.');
+    const allSelectedImages = [...set1Images, ...set2Images];
+    
+    if (allSelectedImages.length < 10) {
+      console.warn(`Only ${allSelectedImages.length} images available, expected 10`);
     }
     
-    // Collect all images with their assignment counts
-    const allImages = [];
-    imagesSnapshot.docs.forEach(doc => {
-      const data = doc.data();
-      allImages.push({
-        id: doc.id,
-        imageNumber: data.imageNumber,
-        set: data.set,
-        assignedCount: data.assignedCount || 0,
-        assignedUsers: data.assignedUsers || []
-      });
-    });
+    // Update assignment tracking
+    await updateImageAssignments(allSelectedImages, userId);
     
-    // Filter available images (not at max assignments and not assigned to this user)
-    const availableImages = allImages.filter(img => 
-      img.assignedCount < VIEWS_PER_IMAGE && 
-      !img.assignedUsers.includes(userId)
+    // Get download URLs for the selected images
+    const imagesWithUrls = await Promise.all(
+      allSelectedImages.map(async (image, index) => {
+        try {
+          const imageRef = ref(storage, image.path);
+          const downloadURL = await getDownloadURL(imageRef);
+          
+          return {
+            id: `${image.set}_${image.name.replace('.png', '')}`, // e.g., "set1_123"
+            name: image.name, // e.g., "123.png"
+            set: image.set,
+            path: image.path, // e.g., "set1/123.png"
+            url: downloadURL,
+            index: index,
+            assignmentCount: image.assignmentCount + 1 // After this assignment
+          };
+        } catch (error) {
+          console.error(`Error getting URL for ${image.path}:`, error);
+          return null;
+        }
+      })
     );
     
-    if (availableImages.length < IMAGES_PER_USER) {
-      throw new Error(`Not enough available images. Need ${IMAGES_PER_USER}, but only ${availableImages.length} available.`);
-    }
+    // Filter out any failed URLs
+    const validImages = imagesWithUrls.filter(img => img !== null);
     
-    // Sort by assignment count (least assigned first), then by image number for consistency
-    availableImages.sort((a, b) => {
-      if (a.assignedCount !== b.assignedCount) {
-        return a.assignedCount - b.assignedCount;
-      }
-      return a.imageNumber - b.imageNumber;
-    });
+    console.log(`Successfully assigned ${validImages.length} images to user ${userId}`);
+    console.log('Assigned images:', validImages.map(img => ({ name: img.name, set: img.set, count: img.assignmentCount })));
     
-    // Try to get balanced selection from both sets
-    const set1Images = availableImages.filter(img => img.set === 'set1');
-    const set2Images = availableImages.filter(img => img.set === 'set2');
-    
-    let selectedImages = [];
-    
-    // Aim for 5 from each set if possible, otherwise take what's available
-    const targetPerSet = Math.floor(IMAGES_PER_USER / 2); // 5 each
-    
-    // Take from set1
-    const set1Selection = set1Images.slice(0, Math.min(targetPerSet, set1Images.length));
-    selectedImages.push(...set1Selection);
-    
-    // Take from set2
-    const set2Selection = set2Images.slice(0, Math.min(targetPerSet, set2Images.length));
-    selectedImages.push(...set2Selection);
-    
-    // If we don't have enough from balanced selection, fill from remaining
-    if (selectedImages.length < IMAGES_PER_USER) {
-      const remaining = availableImages.filter(img => 
-        !selectedImages.some(selected => selected.id === img.id)
-      );
-      const needed = IMAGES_PER_USER - selectedImages.length;
-      selectedImages.push(...remaining.slice(0, needed));
-    }
-    
-    if (selectedImages.length < IMAGES_PER_USER) {
-      throw new Error(`Could not assign enough images. Got ${selectedImages.length}, need ${IMAGES_PER_USER}`);
-    }
-    
-    // Shuffle the selected images for random presentation order
-    for (let i = selectedImages.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [selectedImages[i], selectedImages[j]] = [selectedImages[j], selectedImages[i]];
-    }
-    
-    const assignedImageIds = selectedImages.slice(0, IMAGES_PER_USER).map(img => img.id);
-    
-    console.log(`✅ Selected ${assignedImageIds.length} images for assignment`);
-    
-    // Log distribution
-    const set1Count = selectedImages.slice(0, IMAGES_PER_USER).filter(img => img.set === 'set1').length;
-    const set2Count = selectedImages.slice(0, IMAGES_PER_USER).filter(img => img.set === 'set2').length;
-    console.log(`📊 Distribution: Set1: ${set1Count}, Set2: ${set2Count}`);
-    
-    // Update database with assignments
-    const batch = writeBatch(db);
-    let operationCount = 0;
-    
-    // Update each assigned image
-    for (const imageId of assignedImageIds) {
-      const imageRef = doc(db, 'images', imageId);
-      const currentImage = selectedImages.find(img => img.id === imageId);
-      
-      batch.update(imageRef, {
-        assignedCount: (currentImage.assignedCount || 0) + 1,
-        assignedUsers: [...(currentImage.assignedUsers || []), userId],
-        lastAssignedAt: new Date()
-      });
-      operationCount++;
-    }
-    
-    // Create user progress document
-    const userProgressRef = doc(db, 'userProgress', userId);
-    batch.set(userProgressRef, {
-      assignedImages: assignedImageIds,
-      completedImages: 0,
-      surveyCompleted: false,
-      assignedAt: new Date(),
-      lastUpdated: new Date(),
-      imageDistribution: {
-        set1: set1Count,
-        set2: set2Count,
-        total: assignedImageIds.length
-      }
-    });
-    operationCount++;
-    
-    // Commit all updates
-    await batch.commit();
-    
-    console.log(`🎉 Successfully assigned images to ${userId}:`, assignedImageIds);
-    
-    return assignedImageIds;
-    
+    return validImages;
   } catch (error) {
-    console.error('❌ Error assigning images to user:', error);
+    console.error('Error in assignImagesToUser:', error);
     throw error;
   }
 };
 
-export const checkInitializationStatus = async () => {
+// Get assignment statistics
+export const getAssignmentStats = async () => {
   try {
-    const imagesRef = collection(db, 'images');
-    const metadataRef = doc(db, 'systemMetadata', 'config');
+    const [set1Doc, set2Doc] = await Promise.all([
+      getDoc(doc(db, 'imageAssignments', 'set1')),
+      getDoc(doc(db, 'imageAssignments', 'set2'))
+    ]);
     
-    const imagesSnapshot = await getDocs(imagesRef);
-    const metadataDoc = await getDoc(metadataRef);
+    const set1Data = set1Doc.exists() ? set1Doc.data() : {};
+    const set2Data = set2Doc.exists() ? set2Doc.data() : {};
     
-    // Calculate set distribution
-    let setCounts = {};
-    if (imagesSnapshot.size > 0) {
-      imagesSnapshot.docs.forEach(doc => {
-        const data = doc.data();
-        const set = data.set || 'unknown';
-        setCounts[set] = (setCounts[set] || 0) + 1;
+    // Count assignments for each set
+    const countAssignments = (data) => {
+      const counts = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+      
+      Object.entries(data).forEach(([key, value]) => {
+        if (key.endsWith('.png') && typeof value === 'number') {
+          counts[value] = (counts[value] || 0) + 1;
+        }
       });
-    }
-    
-    // Calculate assignment statistics
-    let totalAssignments = 0;
-    let averageAssignments = 0;
-    if (imagesSnapshot.size > 0) {
-      const assignmentCounts = imagesSnapshot.docs.map(doc => doc.data().assignedCount || 0);
-      totalAssignments = assignmentCounts.reduce((sum, count) => sum + count, 0);
-      averageAssignments = totalAssignments / imagesSnapshot.size;
-    }
+      
+      return counts;
+    };
     
     return {
-      initialized: imagesSnapshot.size > 0 && metadataDoc.exists(),
-      imageCount: imagesSnapshot.size,
-      expectedImages: TOTAL_IMAGES,
-      setCounts: setCounts,
-      metadata: metadataDoc.exists() ? metadataDoc.data() : null,
-      assignmentStats: {
-        totalAssignments,
-        averageAssignments: Math.round(averageAssignments * 100) / 100,
-        maxPossibleAssignments: TOTAL_IMAGES * VIEWS_PER_IMAGE,
-        utilizationPercentage: Math.round((totalAssignments / (TOTAL_IMAGES * VIEWS_PER_IMAGE)) * 100)
+      set1: countAssignments(set1Data),
+      set2: countAssignments(set2Data),
+      totalImages: {
+        set1: 1200,
+        set2: 1200
       }
     };
   } catch (error) {
-    console.error('Error checking initialization:', error);
-    return {
-      initialized: false,
-      error: error.message
-    };
+    console.error('Error getting assignment stats:', error);
+    throw error;
   }
 };
 
+// Reset assignments (admin function)
+export const resetImageAssignments = async () => {
+  try {
+    console.log('Resetting all image assignments...');
+    
+    await Promise.all([
+      setDoc(doc(db, 'imageAssignments', 'set1'), {}),
+      setDoc(doc(db, 'imageAssignments', 'set2'), {})
+    ]);
+    
+    console.log('Image assignments reset successfully');
+  } catch (error) {
+    console.error('Error resetting assignments:', error);
+    throw error;
+  }
+};
+
+// Verify Firebase setup and storage structure
 export const verifySetup = async () => {
   try {
-    const status = await checkInitializationStatus();
+    console.log('Verifying Firebase setup...');
     
-    if (!status.initialized) {
-      return { success: false, message: 'System not initialized' };
-    }
+    // Test Firestore connection
+    const testRef = doc(db, 'test', 'connection');
+    await setDoc(testRef, { timestamp: new Date(), test: true });
+    console.log('✓ Firestore connection working');
     
-    // Verify set distribution
-    const expectedSets = Object.keys(IMAGE_SETS);
-    const actualSets = Object.keys(status.setCounts);
-    
-    const missingSets = expectedSets.filter(set => !actualSets.includes(set));
-    
-    if (missingSets.length > 0) {
-      return { 
-        success: false, 
-        message: `Missing sets: ${missingSets.join(', ')}` 
-      };
-    }
-    
-    // Check if set counts are correct
-    let setVerification = {};
-    let allSetsCorrect = true;
-    
-    for (const [setKey, setInfo] of Object.entries(IMAGE_SETS)) {
-      const expectedCount = setInfo.end - setInfo.start + 1;
-      const actualCount = status.setCounts[setInfo.folder] || 0;
-      const isCorrect = expectedCount === actualCount;
-      
-      setVerification[setKey] = {
-        expected: expectedCount,
-        actual: actualCount,
-        correct: isCorrect,
-        range: `${setInfo.start}-${setInfo.end}`
-      };
-      
-      if (!isCorrect) {
-        allSetsCorrect = false;
-      }
-    }
-    
-    // Test assignment system
-    let assignmentTest = { success: true, message: 'Assignment system operational' };
-    try {
-      // Verify we can find assignable images
-      for (const [setKey, setInfo] of Object.entries(IMAGE_SETS)) {
-        const sampleImageId = `${setInfo.start}`;
-        const imageRef = doc(db, 'images', sampleImageId);
-        const imageDoc = await getDoc(imageRef);
-        
-        if (!imageDoc.exists()) {
-          throw new Error(`Sample image ${sampleImageId} not found in ${setKey}`);
-        }
-      }
-    } catch (assignmentError) {
-      assignmentTest = { success: false, error: assignmentError.message };
-    }
-    
-    return {
-      success: allSetsCorrect && assignmentTest.success,
-      status: status,
-      setVerification: setVerification,
-      assignmentTest: assignmentTest,
-      systemReady: allSetsCorrect && assignmentTest.success,
-      summary: {
-        totalImages: status.imageCount,
-        expectedImages: TOTAL_IMAGES,
-        setsCorrect: allSetsCorrect,
-        assignmentSystemWorking: assignmentTest.success,
-        capacityInfo: {
-          maxParticipants: TOTAL_USERS_NEEDED,
-          imagesPerParticipant: IMAGES_PER_USER,
-          viewsPerImage: VIEWS_PER_IMAGE
-        }
-      }
-    };
-  } catch (error) {
-    console.error('Error verifying setup:', error);
-    return {
-      success: false,
-      error: error.message
-    };
-  }
-};
-
-export const clearAllData = async () => {
-  console.log('🧹 Starting complete data clearance...');
-  let batch = writeBatch(db);
-  let operationCount = 0;
-  let totalDeleted = 0;
-  
-  try {
-    // Collections to clear
-    const collections = [
-      'images', 
-      'loginIDs', 
-      'userProgress', 
-      'systemMetadata', 
-      'completedAssessments',
-      'imageCompletions',
-      'assessmentTracking',
-      'prolificBlacklist'
+    // Test Storage access by checking a few sample images
+    const testImages = [
+      'set1/1.png',
+      'set1/100.png', 
+      'set2/1201.png',
+      'set2/1300.png'
     ];
     
-    for (const collectionName of collections) {
-      console.log(`📁 Clearing collection: ${collectionName}`);
-      const snapshot = await getDocs(collection(db, collectionName));
-      console.log(`   Found ${snapshot.size} documents`);
-      
-      for (const doc of snapshot.docs) {
-        if (operationCount >= 400) {
-          await batch.commit();
-          console.log(`   Committed batch, deleted ${totalDeleted} documents so far...`);
-          batch = writeBatch(db);
-          operationCount = 0;
-        }
-        
-        batch.delete(doc.ref);
-        operationCount++;
-        totalDeleted++;
+    const results = [];
+    for (const imagePath of testImages) {
+      try {
+        const imageRef = ref(storage, imagePath);
+        const url = await getDownloadURL(imageRef);
+        results.push({ path: imagePath, status: 'success', url: url.substring(0, 50) + '...' });
+        console.log(`✓ ${imagePath} accessible`);
+      } catch (error) {
+        results.push({ path: imagePath, status: 'error', error: error.message });
+        console.log(`✗ ${imagePath} failed: ${error.message}`);
       }
     }
     
-    // Commit any remaining operations
-    if (operationCount > 0) {
-      await batch.commit();
-    }
-    
-    console.log(`✅ Successfully cleared all data - ${totalDeleted} documents deleted`);
-    console.log('🎯 System ready for fresh initialization');
-    
-    return true;
-  } catch (error) {
-    console.error('❌ Error clearing data:', error);
-    throw error;
-  }
-};
-
-// Utility function to get system statistics
-export const getSystemStats = async () => {
-  try {
-    const status = await checkInitializationStatus();
-    
-    // Get user statistics
-    const usersSnapshot = await getDocs(collection(db, 'loginIDs'));
-    const userCount = usersSnapshot.size;
-    
-    let completedUsers = 0;
-    let prolificUsers = 0;
-    
-    usersSnapshot.docs.forEach(doc => {
-      if (doc.id === 'ADMIN') return;
-      
-      const userData = doc.data();
-      if (userData.surveyCompleted) completedUsers++;
-      if (userData.prolificData?.prolificPid) prolificUsers++;
-    });
+    // Check assignment collections
+    const assignmentStats = await getAssignmentStats();
     
     return {
-      images: {
-        total: status.imageCount,
-        expected: TOTAL_IMAGES,
-        bySets: status.setCounts,
-        assignments: status.assignmentStats
-      },
-      users: {
-        total: userCount,
-        completed: completedUsers,
-        prolific: prolificUsers,
-        completionRate: userCount > 0 ? Math.round((completedUsers / userCount) * 100) : 0
-      },
-      system: {
-        initialized: status.initialized,
-        capacity: {
-          maxUsers: TOTAL_USERS_NEEDED,
-          currentUtilization: Math.round((userCount / TOTAL_USERS_NEEDED) * 100),
-          remainingCapacity: TOTAL_USERS_NEEDED - userCount
-        }
-      }
+      success: true,
+      firestore: 'connected',
+      storage: results,
+      assignments: assignmentStats,
+      timestamp: new Date().toISOString()
     };
+    
   } catch (error) {
-    console.error('Error getting system stats:', error);
-    throw error;
+    console.error('Setup verification failed:', error);
+    return {
+      success: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    };
   }
 };
 
-// Export system constants for use in other files
-export const SYSTEM_CONFIG = {
-  TOTAL_IMAGES,
-  IMAGES_PER_USER,
-  VIEWS_PER_IMAGE,
-  TOTAL_USERS_NEEDED,
-  IMAGE_SETS
+// Clear all data (admin function - use with caution)
+export const clearAllData = async () => {
+  try {
+    console.log('Clearing all data...');
+    
+    // Clear assignment tracking
+    await resetImageAssignments();
+    
+    // Clear user data (except admin)
+    const usersRef = collection(db, 'loginIDs');
+    const usersSnapshot = await getDocs(usersRef);
+    
+    const deletePromises = [];
+    usersSnapshot.forEach((userDoc) => {
+      if (userDoc.id !== 'ADMIN') {
+        deletePromises.push(deleteDoc(doc(db, 'loginIDs', userDoc.id)));
+      }
+    });
+    
+    await Promise.all(deletePromises);
+    
+    // Clear any test documents
+    try {
+      await deleteDoc(doc(db, 'test', 'connection'));
+    } catch (error) {
+      // Ignore if test doc doesn't exist
+    }
+    
+    console.log('All data cleared successfully');
+    return { success: true, message: 'All data cleared successfully' };
+    
+  } catch (error) {
+    console.error('Error clearing data:', error);
+    throw error;
+  }
 };

@@ -1,109 +1,72 @@
-// src/pages/Survey.js - Complete image evaluation interface with Qualtrics integration
-import React, { useState, useEffect } from 'react';
+// src/pages/Survey.js - Complete fixed version with proper image loading
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { doc, getDoc, updateDoc, serverTimestamp, setDoc, collection } from 'firebase/firestore';
+import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { ref, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../firebase/config';
+import { checkSurveyCompletion } from '../utils/assessment-tracking';
 import {
   Box,
-  Flex,
   Button,
-  Text,
+  Container,
   Image,
-  Progress,
-  Heading,
+  Text,
+  VStack,
+  HStack,
   Alert,
   AlertIcon,
-  Container,
-  Spinner,
-  VStack,
-  useToast,
+  AlertTitle,
+  AlertDescription,
+  Progress,
   Badge,
-  HStack,
   Card,
   CardBody,
   CardHeader,
-  IconButton,
-  Tooltip,
+  Heading,
+  useToast,
+  Spinner,
+  Icon,
+  Flex,
+  Divider,
 } from '@chakra-ui/react';
-import { 
-  LogOut, 
-  RefreshCw, 
-  Eye, 
-  CheckCircle, 
-  AlertTriangle,
-  Info,
-  ExternalLink
-} from 'lucide-react';
-
-const QUALTRICS_SURVEY_URL = process.env.REACT_APP_QUALTRICS_SURVEY_URL || "https://georgetown.az1.qualtrics.com/jfe/form/SV_2uHTpoplf5gc1SK";
-
-// Folder metadata for display purposes
-const FOLDER_INFO = {
-  'cc3m_filtered': { 
-    name: 'Conceptual Captions (Filtered)', 
-    color: 'blue',
-    description: 'Curated high-quality conceptual images'
-  },
-  'cc3m_unfiltered': { 
-    name: 'Conceptual Captions (Unfiltered)', 
-    color: 'green',
-    description: 'Raw conceptual images without filtering'
-  },
-  'laion_filtered': { 
-    name: 'LAION Dataset (Filtered)', 
-    color: 'purple',
-    description: 'Curated LAION dataset images'
-  },
-  'laion_unfiltered': { 
-    name: 'LAION Dataset (Unfiltered)', 
-    color: 'orange',
-    description: 'Raw LAION dataset images'
-  }
-};
-
-const encodeQualtricsParams = (params) => {
-  return Object.entries(params)
-    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
-    .join('&');
-};
+import { ChevronLeft, ChevronRight, Eye, Clock, CheckCircle, ArrowRight } from 'lucide-react';
 
 const Survey = () => {
   const [images, setImages] = useState([]);
-  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentImageIndex, setCurrentImageIndex] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [formSubmitted, setFormSubmitted] = useState(false);
-  const [surveyLoaded, setSurveyLoaded] = useState(false);
-  const [lastResponse, setLastResponse] = useState(null);
-  const [canLoadNextForm, setCanLoadNextForm] = useState(true);
-  const [isFormCompleted, setIsFormCompleted] = useState(false);
-  const [imageLoadError, setImageLoadError] = useState(false);
-  const [retryCount, setRetryCount] = useState(0);
-  
+  const [userProgress, setUserProgress] = useState(null);
+  const [surveyLoading, setSurveyLoading] = useState(false);
+  const [completedImages, setCompletedImages] = useState(new Set());
+  const [qualtricsReady, setQualtricsReady] = useState(false);
+  const [sessionData, setSessionData] = useState({});
   const navigate = useNavigate();
   const toast = useToast();
-  const loginId = sessionStorage.getItem('userLoginId');
-  const prolificPid = sessionStorage.getItem('prolificPid');
+  const iframeRef = useRef(null);
 
   // Load user data and images
-  const loadUserData = async () => {
-    if (!loginId) {
-      console.error('No login ID found in session');
-      navigate('/login');
-      return;
-    }
-
+  const loadUserData = useCallback(async () => {
     try {
       setLoading(true);
-      console.log('Loading user data for:', loginId);
+      const userId = sessionStorage.getItem('userLoginId');
       
-      // Get user data from Firestore
-      const userRef = doc(db, 'loginIDs', loginId);
+      if (!userId) {
+        setError('No user session found');
+        navigate('/login');
+        return;
+      }
+
+      console.log('Loading user data for:', userId);
+      
+      // Get user document
+      const userRef = doc(db, 'loginIDs', userId);
       const userDoc = await getDoc(userRef);
       
       if (!userDoc.exists()) {
-        throw new Error('User not found');
+        setError('User not found');
+        navigate('/login');
+        return;
       }
       
       const userData = userDoc.data();
@@ -111,727 +74,549 @@ const Survey = () => {
       
       // Check if user has consented
       if (!userData.hasConsented) {
-        console.log('User has not consented, redirecting to consent page');
+        console.log('User has not consented, redirecting...');
         navigate('/consent');
         return;
       }
       
-      // Get assigned images (should be 4 images, one from each folder)
+      // Get assigned images
       const assignedImages = userData.assignedImages || [];
-      const completedImages = userData.completedImages || 0;
+      console.log('Assigned images:', assignedImages);
       
       if (assignedImages.length === 0) {
-        throw new Error('No images assigned to this user. Please contact support.');
+        setError('No images assigned to this user');
+        return;
       }
       
-      console.log(`Loading ${assignedImages.length} assigned images:`, assignedImages);
-      
-      // If marked as completed but hasn't viewed all images, fix the data
-      if (userData.surveyCompleted && completedImages < assignedImages.length) {
-        console.log('Fixing survey completion status');
-        await updateDoc(userRef, {
-          surveyCompleted: false,
-          lastUpdated: serverTimestamp()
-        });
-      }
-
-      // Load images from Firestore and Firebase Storage
-      const loadedImages = await Promise.all(
-        assignedImages.map(async (imageId, index) => {
-          try {
-            console.log(`Loading image ${imageId}...`);
-            
-            // Get image document from Firestore
-            const imageDocRef = doc(db, 'images', imageId);
-            const imageDoc = await getDoc(imageDocRef);
-            
-            if (!imageDoc.exists()) {
-              console.error(`Image document ${imageId} not found in Firestore`);
-              throw new Error(`Image document ${imageId} not found`);
-            }
-            
-            const imageData = imageDoc.data();
-            console.log(`Image data for ${imageId}:`, imageData);
-            
-            // Get the storage path
-            const storagePath = imageData.storagePath;
-            if (!storagePath) {
-              throw new Error(`No storage path found for image ${imageId}`);
-            }
-            
-            console.log(`Loading image from Firebase Storage: ${storagePath}`);
-            
-            try {
-              // Get download URL from Firebase Storage
-              const imageRef = ref(storage, storagePath);
-              const imageUrl = await getDownloadURL(imageRef);
-              
-              console.log(`Successfully loaded image ${imageId} from ${storagePath}`);
-              
-              // Get folder info for display
-              const folderInfo = FOLDER_INFO[imageData.category] || FOLDER_INFO[imageData.folder] || {
-                name: 'Unknown Category',
-                color: 'gray',
-                description: 'Category information not available'
-              };
-              
-              return {
-                id: imageId,
-                imageUrl: imageUrl,
-                order: index + 1,
-                category: imageData.category || imageData.folder,
-                folder: imageData.folder,
-                folderInfo: folderInfo,
-                imageNumber: imageData.imageNumber || parseInt(imageId),
-                storagePath: storagePath,
-                prompt: `Please evaluate this image from ${folderInfo.name}`,
-                isLoaded: true
-              };
-            } catch (storageError) {
-              console.error(`Storage error for ${imageId}:`, storageError);
-              
-              // Create fallback placeholder
-              const folderInfo = FOLDER_INFO[imageData.category] || FOLDER_INFO[imageData.folder] || {
-                name: 'Unknown Category',
-                color: 'gray',
-                description: 'Category information not available'
-              };
-              
-              return {
-                id: imageId,
-                imageUrl: `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='800' height='600' viewBox='0 0 800 600'%3E%3Crect width='800' height='600' fill='%23f0f0f0'/%3E%3Ctext x='400' y='250' font-family='Arial' font-size='24' text-anchor='middle' fill='%23666'%3EImage ${imageId}%3C/text%3E%3Ctext x='400' y='300' font-family='Arial' font-size='18' text-anchor='middle' fill='%23888'%3E${folderInfo.name}%3C/text%3E%3Ctext x='400' y='350' font-family='Arial' font-size='14' text-anchor='middle' fill='%23aaa'%3EPlaceholder - Check Storage%3C/text%3E%3C/svg%3E`,
-                order: index + 1,
-                category: imageData.category || imageData.folder,
-                folder: imageData.folder,
-                folderInfo: folderInfo,
-                imageNumber: imageData.imageNumber || parseInt(imageId),
-                storagePath: storagePath,
-                prompt: `Please evaluate this placeholder for ${folderInfo.name}`,
-                isPlaceholder: true,
-                isLoaded: false
-              };
-            }
-          } catch (error) {
-            console.error(`Error loading image ${imageId}:`, error);
-            
-            // Return a basic fallback
+      // Load image data with proper error handling
+      const imagePromises = assignedImages.map(async (imageData, index) => {
+        try {
+          console.log(`Loading image ${index + 1}:`, imageData);
+          
+          // Image data should already contain the download URL from assignment
+          if (imageData.url) {
             return {
-              id: imageId,
-              imageUrl: `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='800' height='600' viewBox='0 0 800 600'%3E%3Crect width='800' height='600' fill='%23f8f8f8'/%3E%3Ctext x='400' y='300' font-family='Arial' font-size='20' text-anchor='middle' fill='%23999'%3EImage ${imageId} - Error Loading%3C/text%3E%3C/svg%3E`,
-              order: index + 1,
-              category: 'unknown',
-              folder: 'unknown',
-              folderInfo: { name: 'Error', color: 'red', description: 'Failed to load image data' },
-              imageNumber: parseInt(imageId) || 0,
-              prompt: `Error loading image ${imageId}`,
-              isPlaceholder: true,
-              hasError: true,
-              isLoaded: false
+              ...imageData,
+              loaded: true
             };
           }
-        })
-      );
-
-      setImages(loadedImages);
+          
+          // Fallback: if no URL, try to get it from storage
+          if (imageData.path) {
+            console.log(`Getting download URL for path: ${imageData.path}`);
+            const imageRef = ref(storage, imageData.path);
+            const downloadURL = await getDownloadURL(imageRef);
+            
+            return {
+              ...imageData,
+              url: downloadURL,
+              loaded: true
+            };
+          }
+          
+          // Last resort: construct path from name and set
+          if (imageData.name && imageData.set) {
+            const constructedPath = `${imageData.set}/${imageData.name}`;
+            console.log(`Constructing path: ${constructedPath}`);
+            const imageRef = ref(storage, constructedPath);
+            const downloadURL = await getDownloadURL(imageRef);
+            
+            return {
+              ...imageData,
+              path: constructedPath,
+              url: downloadURL,
+              loaded: true
+            };
+          }
+          
+          throw new Error(`Insufficient image data: ${JSON.stringify(imageData)}`);
+          
+        } catch (error) {
+          console.error(`Error loading image ${index + 1}:`, error);
+          console.error('Image data:', imageData);
+          
+          return {
+            ...imageData,
+            error: error.message,
+            loaded: false
+          };
+        }
+      });
       
-      // Set current index to the number of completed images
-      setCurrentIndex(Math.min(completedImages, loadedImages.length - 1));
-      setLoading(false);
+      const loadedImages = await Promise.all(imagePromises);
+      console.log('All images processed:', loadedImages);
       
-      console.log(`Loaded ${loadedImages.length} images, starting at index ${completedImages}`);
+      // Filter out failed images and log them
+      const validImages = loadedImages.filter(img => img.loaded);
+      const failedImages = loadedImages.filter(img => !img.loaded);
       
-      // Show welcome message
-      toast({
-        title: 'Images Loaded Successfully',
-        description: `Ready to evaluate ${loadedImages.length} images. Starting with image ${completedImages + 1}.`,
-        status: 'success',
-        duration: 3000,
+      if (failedImages.length > 0) {
+        console.error('Failed to load images:', failedImages);
+        console.error('This might indicate missing images in Firebase Storage or incorrect paths');
+      }
+      
+      if (validImages.length === 0) {
+        setError('No images could be loaded. Please contact support.');
+        return;
+      }
+      
+      setImages(validImages);
+      setUserProgress(userData);
+      
+      // Set up completed images tracking
+      const completed = new Set();
+      if (userData.completedImageIds) {
+        userData.completedImageIds.forEach(id => completed.add(id));
+      }
+      setCompletedImages(completed);
+      
+      // Determine starting image index
+      const completedImagesCount = userData.completedImages || 0;
+      const startIndex = Math.min(completedImagesCount, validImages.length - 1);
+      setCurrentImageIndex(startIndex);
+      
+      console.log(`Loaded ${validImages.length} images, starting at index ${startIndex}`);
+      
+      if (failedImages.length > 0) {
+        console.warn(`${failedImages.length} images failed to load`);
+      }
+      
+      // Set up session data for Qualtrics
+      const prolificPid = sessionStorage.getItem('prolificPid') || 'TEST_USER';
+      const displayId = sessionStorage.getItem('displayId') || prolificPid;
+      
+      setSessionData({
+        userId,
+        prolificPid,
+        displayId,
+        isTestMode: sessionStorage.getItem('testMode') === 'true'
       });
       
     } catch (error) {
       console.error('Error loading user data:', error);
-      setError(`Failed to load survey: ${error.message}`);
+      setError(`Failed to load study data: ${error.message}`);
+    } finally {
       setLoading(false);
     }
-  };
+  }, [navigate]);
 
-  // Load data on mount
+  // Initialize component
   useEffect(() => {
     loadUserData();
-  }, []);
+  }, [loadUserData]);
 
-  // Handle Qualtrics messages
+  // Set up Qualtrics message listener
   useEffect(() => {
-    const handleMessage = (event) => {
-      // Only accept messages from Qualtrics
-      if (event.origin !== "https://georgetown.az1.qualtrics.com") {
-        console.log('Ignoring message from:', event.origin);
-        return;
-      }
-      
+    const handleQualtricsMessage = (event) => {
       try {
-        console.log('Message received from Qualtrics:', event.data);
-        
-        // Handle string-based completion signals
-        if (typeof event.data === 'string' && event.data.includes('QualtricsEOS')) {
-          console.log('Survey completion detected via string');
-          handleSurveyCompletion();
-          return;
-        }
-        
-        // Handle object-based completion signals
-        if (typeof event.data === 'object' && event.data !== null) {
-          const data = event.data;
-          if (data.type === 'QualtricsEOS' || data.event === 'survey_complete') {
-            console.log('Survey completion detected via object');
-            if (data.responseId) {
-              setLastResponse(data.responseId);
-              console.log('Qualtrics Response ID captured:', data.responseId);
-            }
-            handleSurveyCompletion(data.responseId);
+        if (event.data && typeof event.data === 'object') {
+          console.log('Received message from Qualtrics:', event.data);
+          
+          if (event.data.type === 'survey_completed') {
+            handleSurveyCompletion(event.data);
+          } else if (event.data.type === 'survey_ready') {
+            setQualtricsReady(true);
+            setSurveyLoading(false);
           }
         }
       } catch (error) {
-        // Only log significant errors, ignore parsing errors for non-JSON strings
-        if (typeof event.data !== 'string' || event.data.startsWith('{')) {
-          console.error('Error processing Qualtrics message:', error);
-        }
+        console.error('Error handling Qualtrics message:', error);
       }
     };
 
     console.log('Setting up Qualtrics message listener');
-    window.addEventListener('message', handleMessage);
+    window.addEventListener('message', handleQualtricsMessage);
     
     return () => {
       console.log('Cleaning up Qualtrics message listener');
-      window.removeEventListener('message', handleMessage);
+      window.removeEventListener('message', handleQualtricsMessage);
     };
-  }, [currentIndex, images, loginId]);
+  }, [currentImageIndex]);
 
   // Handle survey completion
-  const handleSurveyCompletion = async (responseId = null) => {
-    console.log('Handling survey completion for image:', currentIndex + 1);
-    
-    setFormSubmitted(true);
-    setCanLoadNextForm(false);
-    setIsFormCompleted(true);
-    
-    // Track the completion with full metadata
+  const handleSurveyCompletion = async (surveyData) => {
     try {
-      const currentImage = images[currentIndex];
-      const completionData = {
-        userId: loginId,
-        imageId: currentImage.id,
-        imageNumber: currentIndex + 1,
-        category: currentImage.category,
-        folder: currentImage.folder,
-        responseId: responseId || lastResponse,
-        prolificPid: prolificPid,
-        userIdSentToQualtrics: prolificPid || loginId,
-        completedAt: serverTimestamp(),
-        sessionInfo: {
-          studyId: new URLSearchParams(window.location.search).get('STUDY_ID'),
-          sessionId: new URLSearchParams(window.location.search).get('SESSION_ID')
-        }
-      };
+      const userId = sessionData.userId;
+      const currentImage = images[currentImageIndex];
       
-      // Save to completion tracking collection
-      const completionRef = doc(collection(db, 'imageCompletions'));
-      await setDoc(completionRef, completionData);
-      
-      console.log('Image completion tracked:', completionData);
-      
-    } catch (error) {
-      console.error('Error tracking image completion:', error);
-    }
-  };
+      if (!currentImage || !userId) {
+        console.error('Missing required data for survey completion');
+        return;
+      }
 
-  // Reset states when moving to next image
-  useEffect(() => {
-    setFormSubmitted(false);
-    setSurveyLoaded(false);
-    setLastResponse(null);
-    setCanLoadNextForm(true);
-    setIsFormCompleted(false);
-    setImageLoadError(false);
-  }, [currentIndex]);
-
-  const handleNext = async () => {
-    if (!formSubmitted) {
-      toast({
-        title: "Survey Incomplete",
-        description: "Please complete the survey form before proceeding to the next image",
-        status: "warning",
-        duration: 4000,
-      });
-      return;
-    }
-
-    try {
-      const userRef = doc(db, 'loginIDs', loginId);
+      console.log('Processing survey completion for image:', currentImage.id);
       
-      // Update progress
+      // Update completed images tracking
+      const newCompletedImages = new Set(completedImages);
+      newCompletedImages.add(currentImage.id);
+      setCompletedImages(newCompletedImages);
+      
+      // Update user progress in Firestore
+      const userRef = doc(db, 'loginIDs', userId);
+      const newCompletedCount = newCompletedImages.size;
+      
       await updateDoc(userRef, {
-        completedImages: currentIndex + 1,
-        lastUpdated: serverTimestamp()
+        completedImages: newCompletedCount,
+        completedImageIds: Array.from(newCompletedImages),
+        lastImageCompleted: currentImage.id,
+        lastCompletionTime: serverTimestamp(),
+        [`imageCompletion_${currentImage.id}`]: {
+          completedAt: serverTimestamp(),
+          surveyData: surveyData,
+          imageIndex: currentImageIndex
+        }
       });
-
-      if (currentIndex >= images.length - 1) {
+      
+      console.log(`Updated user progress: ${newCompletedCount}/${images.length} images completed`);
+      
+      toast({
+        title: 'Response Saved',
+        description: `Image ${currentImageIndex + 1} evaluation completed`,
+        status: 'success',
+        duration: 2000,
+      });
+      
+      // Check if all images are completed
+      if (newCompletedCount >= images.length) {
         // Mark survey as completed
         await updateDoc(userRef, {
           surveyCompleted: true,
           completedAt: serverTimestamp()
         });
         
-        // Set in session storage
-        sessionStorage.setItem('surveyCompleted', 'true');
-        
         toast({
-          title: "Study Complete!",
-          description: "Thank you for your participation. Redirecting to completion page...",
-          status: "success",
+          title: 'Study Completed!',
+          description: 'Thank you for your participation',
+          status: 'success',
           duration: 3000,
         });
         
-        // Navigate to completion after a short delay
+        // Navigate to completion page
         setTimeout(() => {
           navigate('/completion');
         }, 2000);
       } else {
         // Move to next image
-        setFormSubmitted(false);
-        setSurveyLoaded(false);
-        setCanLoadNextForm(true);
-        setIsFormCompleted(false);
-        setCurrentIndex(prev => prev + 1);
-        
-        toast({
-          title: "Progress Saved",
-          description: `Moving to image ${currentIndex + 2} of ${images.length}`,
-          status: "success",
-          duration: 2000,
-        });
-      }
-    } catch (error) {
-      console.error('Error updating progress:', error);
-      toast({
-        title: "Error",
-        description: "Failed to save progress. Please try again.",
-        status: "error",
-        duration: 5000,
-        isClosable: true,
-      });
-    }
-  };
-
-  const handleLogout = () => {
-    const confirmLogout = window.confirm('Are you sure you want to logout? Your progress has been saved and you can return later to continue.');
-    if (confirmLogout) {
-      sessionStorage.removeItem('userLoginId');
-      sessionStorage.removeItem('prolificPid');
-      sessionStorage.removeItem('displayId');
-      navigate('/login');
-    }
-  };
-
-  const handleRefreshSurvey = () => {
-    setSurveyLoaded(false);
-    setCanLoadNextForm(true);
-    setFormSubmitted(false);
-    setIsFormCompleted(false);
-    
-    toast({
-      title: 'Survey Refreshed',
-      description: 'The survey form has been reloaded',
-      status: 'info',
-      duration: 2000,
-    });
-  };
-
-  const handleImageError = () => {
-    setImageLoadError(true);
-    console.error('Error loading image:', images[currentIndex]?.imageUrl);
-  };
-
-  const handleImageRetry = async () => {
-    if (retryCount < 3) {
-      setRetryCount(prev => prev + 1);
-      setImageLoadError(false);
-      
-      // Try to reload the image URL
-      const currentImage = images[currentIndex];
-      if (currentImage && !currentImage.isPlaceholder) {
-        try {
-          const imageRef = ref(storage, currentImage.storagePath);
-          const newImageUrl = await getDownloadURL(imageRef);
-          
-          // Update the image URL
-          const updatedImages = [...images];
-          updatedImages[currentIndex] = {
-            ...currentImage,
-            imageUrl: newImageUrl
-          };
-          setImages(updatedImages);
-          
-          toast({
-            title: 'Image Reloaded',
-            description: 'Successfully refreshed the image',
-            status: 'success',
-            duration: 2000,
-          });
-        } catch (error) {
-          console.error('Error retrying image load:', error);
-          toast({
-            title: 'Retry Failed',
-            description: 'Could not reload the image. Using placeholder.',
-            status: 'error',
-            duration: 3000,
-          });
+        const nextIndex = currentImageIndex + 1;
+        if (nextIndex < images.length) {
+          setCurrentImageIndex(nextIndex);
+          setQualtricsReady(false);
         }
       }
-    } else {
+      
+    } catch (error) {
+      console.error('Error handling survey completion:', error);
       toast({
-        title: 'Maximum Retries Reached',
-        description: 'Please proceed with the placeholder image or contact support',
-        status: 'warning',
-        duration: 4000,
+        title: 'Error Saving Response',
+        description: 'Please try again or contact support',
+        status: 'error',
+        duration: 5000,
       });
     }
   };
 
-  const getQualtricsUrl = () => {
-    if (!images[currentIndex]?.id || !loginId) return '';
-
-    const currentImage = images[currentIndex];
-    
-    // Get Prolific ID from session for user_id field
-    const userIdForQualtrics = prolificPid || loginId;
-    
-    const params = {
-      // PRIMARY USER IDENTIFICATION for Qualtrics
-      user_id: userIdForQualtrics,
-      
-      // SECONDARY IDENTIFIERS for internal tracking
-      internal_user_id: loginId,
-      prolific_pid: prolificPid || '',
-      
-      // IMAGE AND STUDY INFORMATION
-      image_id: currentImage.id,
-      image_number: currentIndex + 1,
-      total_images: images.length,
-      category: currentImage.category,
-      folder: currentImage.folder,
-      image_storage_path: currentImage.storagePath,
-      
-      // SESSION INFORMATION
-      session_timestamp: new Date().toISOString(),
-      study_id: new URLSearchParams(window.location.search).get('STUDY_ID') || '',
-      session_id: new URLSearchParams(window.location.search).get('SESSION_ID') || '',
-      
-      // TECHNICAL PARAMETERS
-      prevent_auto_advance: 'true',
-      source: prolificPid ? 'prolific' : 'direct'
-    };
-
-    console.log('Qualtrics URL parameters:', params);
-    return `${QUALTRICS_SURVEY_URL}?${encodeQualtricsParams(params)}`;
+  // Navigate between images
+  const navigateToImage = (index) => {
+    if (index >= 0 && index < images.length) {
+      setCurrentImageIndex(index);
+      setQualtricsReady(false);
+      setSurveyLoading(true);
+    }
   };
 
+  // Generate Qualtrics URL with parameters
+  const generateQualtricsUrl = () => {
+    const currentImage = images[currentImageIndex];
+    if (!currentImage) return '';
+    
+    const baseUrl = process.env.REACT_APP_QUALTRICS_SURVEY_URL;
+    if (!baseUrl) {
+      console.error('Qualtrics survey URL not configured');
+      return '';
+    }
+    
+    const params = new URLSearchParams({
+      user_id: sessionData.userId || 'unknown',
+      prolific_pid: sessionData.prolificPid || 'test',
+      image_id: currentImage.id || 'unknown',
+      image_name: currentImage.name || 'unknown',
+      image_set: currentImage.set || 'unknown',
+      image_index: currentImageIndex.toString(),
+      total_images: images.length.toString(),
+      is_test: sessionData.isTestMode ? 'true' : 'false'
+    });
+    
+    const finalUrl = `${baseUrl}?${params.toString()}`;
+    console.log('Qualtrics URL parameters:', Object.fromEntries(params));
+    return finalUrl;
+  };
+
+  // Handle iframe load
+  const handleIframeLoad = () => {
+    console.log('Survey iframe loaded for image:', images[currentImageIndex]?.id);
+    setSurveyLoading(false);
+  };
+
+  // Get current image
+  const currentImage = images[currentImageIndex];
+  const progressPercentage = images.length > 0 ? Math.round((completedImages.size / images.length) * 100) : 0;
+  
   if (loading) {
     return (
-      <Flex minH="100vh" align="center" justify="center" bg="gray.50">
+      <Box display="flex" justifyContent="center" alignItems="center" minH="100vh">
         <VStack spacing={4}>
           <Spinner size="xl" color="blue.500" />
           <Text>Loading your assigned images...</Text>
-          <Text fontSize="sm" color="gray.600">This may take a moment</Text>
         </VStack>
-      </Flex>
+      </Box>
     );
   }
 
   if (error) {
     return (
-      <Flex minH="100vh" align="center" justify="center" p={4} bg="gray.50">
-        <Alert status="error" borderRadius="md" maxW="lg">
+      <Box display="flex" justifyContent="center" alignItems="center" minH="100vh">
+        <Alert status="error" maxW="md">
           <AlertIcon />
-          <VStack align="start">
-            <Text fontWeight="bold">Error loading survey</Text>
-            <Text>{error}</Text>
-            <HStack mt={3}>
-              <Button onClick={() => window.location.reload()} colorScheme="red">
-                Try Again
-              </Button>
-              <Button onClick={handleLogout} variant="outline">
-                Return to Login
-              </Button>
-            </HStack>
-          </VStack>
+          <Box>
+            <AlertTitle>Error Loading Study</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
+          </Box>
         </Alert>
-      </Flex>
+      </Box>
     );
   }
 
-  const currentImage = images[currentIndex];
+  if (!currentImage) {
+    return (
+      <Box display="flex" justifyContent="center" alignItems="center" minH="100vh">
+        <Alert status="warning" maxW="md">
+          <AlertIcon />
+          <Box>
+            <AlertTitle>No Image Available</AlertTitle>
+            <AlertDescription>No image data found for current index.</AlertDescription>
+          </Box>
+        </Alert>
+      </Box>
+    );
+  }
 
   return (
     <Box minH="100vh" bg="gray.50">
       {/* Header */}
-      <Box position="fixed" top={0} left={0} right={0} bg="white" boxShadow="sm" zIndex={10}>
-        <Container maxW="7xl" py={4}>
-          <Flex justify="space-between" align="center" mb={2}>
+      <Box bg="white" borderBottom="1px" borderColor="gray.200" py={4}>
+        <Container maxW="6xl">
+          <HStack justify="space-between">
             <VStack align="start" spacing={1}>
-              <Heading size="lg">Image Evaluation Survey</Heading>
-              <HStack>
-                <Text fontSize="sm" color="gray.600">
-                  Image {currentIndex + 1} of {images.length}
-                </Text>
-                {currentImage && (
-                  <Badge colorScheme={currentImage.folderInfo.color} size="sm">
-                    {currentImage.folderInfo.name}
-                  </Badge>
+              <Heading size="md">Image Evaluation Study</Heading>
+              <HStack spacing={2}>
+                <Badge colorScheme="blue">
+                  Image {currentImageIndex + 1} of {images.length}
+                </Badge>
+                <Badge colorScheme="green">
+                  {completedImages.size} completed
+                </Badge>
+                {sessionData.isTestMode && (
+                  <Badge colorScheme="orange">Test Mode</Badge>
                 )}
               </HStack>
             </VStack>
-            <HStack spacing={3}>
-              <Text fontSize="sm" color="gray.600" fontFamily="mono">
-                {prolificPid ? `${prolificPid.substring(0, 8)}...` : loginId?.substring(0, 12)}
+            
+            <VStack align="end" spacing={1}>
+              <Text fontSize="sm" color="gray.600">
+                Progress: {progressPercentage}%
               </Text>
-              <Tooltip label="Refresh survey form">
-                <IconButton
-                  icon={<RefreshCw />}
-                  onClick={handleRefreshSurvey}
-                  size="sm"
-                  variant="outline"
-                  aria-label="Refresh survey"
-                />
-              </Tooltip>
-              <Button 
-                leftIcon={<LogOut />}
-                onClick={handleLogout}
-                colorScheme="red"
-                size="sm"
-              >
-                Logout
-              </Button>
-            </HStack>
-          </Flex>
-          <Progress 
-            value={((currentIndex + 1) / images.length) * 100} 
-            size="sm"
-            colorScheme={currentImage?.folderInfo.color || "blue"}
-          />
+              <Progress 
+                value={progressPercentage} 
+                size="sm" 
+                colorScheme="blue" 
+                w="200px"
+              />
+            </VStack>
+          </HStack>
         </Container>
       </Box>
 
-      {/* Main Content */}
-      <Container maxW="7xl" pt="120px" pb="120px">
-        <Flex gap={8} direction={{ base: "column", lg: "row" }}>
-          {/* Image Display */}
-          <Box flex="2" bg="white" p={6} borderRadius="lg" boxShadow="md">
-            <VStack spacing={4} align="stretch">
-              <Card>
-                <CardBody p={0} position="relative">
-                  {imageLoadError ? (
-                    <VStack spacing={4} p={8} minH="400px" justify="center">
-                      <AlertTriangle size={48} color="#E53E3E" />
-                      <Text fontSize="lg" fontWeight="bold" color="red.600">
-                        Image Failed to Load
-                      </Text>
-                      <Text textAlign="center" color="gray.600">
-                        There was an issue loading this image. You can try refreshing or proceed with the evaluation.
-                      </Text>
-                      <HStack>
-                        <Button 
-                          leftIcon={<RefreshCw />}
-                          onClick={handleImageRetry}
-                          colorScheme="blue"
-                          isDisabled={retryCount >= 3}
-                        >
-                          Retry ({3 - retryCount} left)
-                        </Button>
-                        <Button 
-                          leftIcon={<Eye />}
-                          onClick={() => setImageLoadError(false)}
-                          variant="outline"
-                        >
-                          Use Placeholder
-                        </Button>
-                      </HStack>
-                    </VStack>
-                  ) : (
+      <Container maxW="6xl" py={6}>
+        <HStack spacing={6} align="start">
+          {/* Left Side - Image Display */}
+          <Box flex="1" maxW="500px">
+            <Card>
+              <CardHeader>
+                <VStack spacing={2}>
+                  <HStack w="full" justify="space-between">
+                    <Text fontSize="sm" color="gray.600">
+                      {currentImage.set?.toUpperCase()} - {currentImage.name}
+                    </Text>
+                    {completedImages.has(currentImage.id) && (
+                      <Badge colorScheme="green" leftIcon={<CheckCircle size={12} />}>
+                        Completed
+                      </Badge>
+                    )}
+                  </HStack>
+                  <Divider />
+                </VStack>
+              </CardHeader>
+              <CardBody>
+                <VStack spacing={4}>
+                  <Box
+                    position="relative"
+                    w="full"
+                    maxW="400px"
+                    mx="auto"
+                    bg="gray.100"
+                    borderRadius="md"
+                    overflow="hidden"
+                  >
                     <Image
-                      src={currentImage?.imageUrl}
-                      alt={`Image ${currentIndex + 1}`}
+                      src={currentImage.url}
+                      alt={`Study image ${currentImageIndex + 1}`}
                       w="full"
                       h="auto"
-                      maxH="70vh"
+                      maxH="400px"
                       objectFit="contain"
-                      borderRadius="md"
-                      fallback={<Spinner />}
-                      onError={handleImageError}
-                      border={currentImage?.isPlaceholder ? "2px dashed #CBD5E0" : "none"}
+                      onError={(e) => {
+                        console.error('Image failed to load:', currentImage);
+                        e.target.style.display = 'none';
+                      }}
                     />
-                  )}
-                </CardBody>
-              </Card>
-              
-              {/* Image Info */}
-              <Card>
-                <CardHeader pb={2}>
-                  <HStack justify="space-between">
-                    <Text fontSize="lg" fontWeight="bold" color="gray.700">
-                      Image {currentIndex + 1} of {images.length}
+                  </Box>
+                  
+                  {/* Image Navigation */}
+                  <HStack spacing={2} w="full" justify="center">
+                    <Button
+                      leftIcon={<ChevronLeft />}
+                      size="sm"
+                      variant="outline"
+                      onClick={() => navigateToImage(currentImageIndex - 1)}
+                      isDisabled={currentImageIndex === 0}
+                    >
+                      Previous
+                    </Button>
+                    
+                    <Text fontSize="sm" color="gray.600" minW="100px" textAlign="center">
+                      {currentImageIndex + 1} of {images.length}
                     </Text>
-                    <Badge colorScheme={currentImage?.folderInfo.color} variant="solid">
-                      {currentImage?.folderInfo.name}
-                    </Badge>
+                    
+                    <Button
+                      rightIcon={<ChevronRight />}
+                      size="sm"
+                      variant="outline"
+                      onClick={() => navigateToImage(currentImageIndex + 1)}
+                      isDisabled={currentImageIndex === images.length - 1}
+                    >
+                      Next
+                    </Button>
                   </HStack>
-                </CardHeader>
-                <CardBody pt={0}>
-                  <VStack align="start" spacing={2}>
-                    <Text fontSize="sm" color="gray.600">
-                      {currentImage?.folderInfo.description}
-                    </Text>
-                    
-                    <HStack spacing={4} fontSize="sm" color="gray.500" wrap="wrap">
-                      <Text>ID: {currentImage?.id}</Text>
-                      <Text>Category: {currentImage?.category}</Text>
-                      {currentImage?.imageNumber && (
-                        <Text>Number: {currentImage.imageNumber}</Text>
-                      )}
-                      {currentImage?.isLoaded && (
-                        <Badge colorScheme="green" size="sm">Loaded</Badge>
-                      )}
+                </VStack>
+              </CardBody>
+            </Card>
+          </Box>
+
+          {/* Right Side - Survey */}
+          <Box flex="2">
+            <Card h="600px">
+              <CardHeader>
+                <HStack justify="space-between">
+                  <HStack>
+                    <Icon as={Eye} color="blue.500" />
+                    <Text fontWeight="bold">Image Evaluation Survey</Text>
+                  </HStack>
+                  {surveyLoading && (
+                    <HStack>
+                      <Spinner size="sm" />
+                      <Text fontSize="sm" color="gray.600">Loading survey...</Text>
                     </HStack>
-                    
-                    {currentImage?.isPlaceholder && (
-                      <Alert status="warning" size="sm">
-                        <AlertIcon />
-                        <Text fontSize="sm">
-                          {currentImage.hasError ? 
-                            "Error loading image - using placeholder" : 
-                            "Using placeholder for testing"}
-                        </Text>
-                      </Alert>
-                    )}
-                  </VStack>
-                </CardBody>
-              </Card>
-            </VStack>
-          </Box>
-
-          {/* Survey Form */}
-          <Box flex="3" bg="white" borderRadius="lg" boxShadow="md" h="800px" overflow="hidden">
-            {!surveyLoaded && canLoadNextForm && (
-              <Flex h="full" align="center" justify="center">
-                <VStack spacing={4}>
-                  <Spinner size="xl" color={currentImage?.folderInfo.color || "blue"} />
-                  <Text>Loading evaluation form...</Text>
-                  <Text fontSize="sm" color="gray.500">
-                    For {currentImage?.folderInfo.name}
-                  </Text>
-                  <Text fontSize="xs" color="gray.400">
-                    This may take a few seconds
-                  </Text>
-                </VStack>
-              </Flex>
-            )}
-            
-            {canLoadNextForm && (
-              <iframe
-                key={`${currentIndex}-${currentImage?.id}-${loginId}`}
-                src={getQualtricsUrl()}
-                title="Evaluation Form"
-                width="100%"
-                height="100%"
-                style={{ 
-                  display: surveyLoaded ? 'block' : 'none',
-                  border: 'none'
-                }}
-                onLoad={() => {
-                  console.log('Survey iframe loaded for image:', currentImage?.id);
-                  setSurveyLoaded(true);
-                }}
-                onError={() => {
-                  console.error('Survey iframe failed to load');
-                  toast({
-                    title: 'Survey Load Error',
-                    description: 'There was an error loading the survey. Please try refreshing.',
-                    status: 'error',
-                    duration: 5000,
-                    isClosable: true,
-                  });
-                }}
-              />
-            )}
-            
-            {isFormCompleted && !canLoadNextForm && (
-              <Flex h="full" align="center" justify="center" p={8}>
-                <VStack spacing={4}>
-                  <CheckCircle size={48} color="#38A169" />
-                  <Text fontSize="lg" color="green.600" textAlign="center" fontWeight="bold">
-                    ✓ Evaluation Complete
-                  </Text>
-                  <Text color="gray.600" textAlign="center">
-                    Your response has been recorded successfully. Click "Next Image" below to continue.
-                  </Text>
-                  {lastResponse && (
-                    <Text fontSize="xs" color="gray.500" fontFamily="mono">
-                      Response ID: {lastResponse}
-                    </Text>
                   )}
-                </VStack>
-              </Flex>
-            )}
+                </HStack>
+              </CardHeader>
+              <CardBody p={0}>
+                <Box position="relative" h="full">
+                  {surveyLoading && (
+                    <Flex
+                      position="absolute"
+                      top="0"
+                      left="0"
+                      right="0"
+                      bottom="0"
+                      bg="white"
+                      zIndex="10"
+                      align="center"
+                      justify="center"
+                    >
+                      <VStack spacing={3}>
+                        <Spinner size="lg" color="blue.500" />
+                        <Text>Loading evaluation form...</Text>
+                      </VStack>
+                    </Flex>
+                  )}
+                  
+                  <iframe
+                    ref={iframeRef}
+                    src={generateQualtricsUrl()}
+                    width="100%"
+                    height="100%"
+                    frameBorder="0"
+                    onLoad={handleIframeLoad}
+                    style={{
+                      border: 'none',
+                      borderRadius: '0 0 8px 8px'
+                    }}
+                    title={`Survey for image ${currentImageIndex + 1}`}
+                  />
+                </Box>
+              </CardBody>
+            </Card>
           </Box>
-        </Flex>
-      </Container>
+        </HStack>
 
-      {/* Footer */}
-      <Box position="fixed" bottom={0} left={0} right={0} bg="white" borderTop="1px" borderColor="gray.200" zIndex={10}>
-        <Container maxW="7xl" py={4}>
-          <Flex justify="space-between" align="center">
-            <Alert 
-              status={formSubmitted ? "success" : "info"} 
-              borderRadius="md"
-              variant="left-accent"
-              maxW="lg"
-            >
-              <AlertIcon />
-              <VStack align="start" spacing={0}>
+        {/* Bottom Progress Bar */}
+        <Card mt={6}>
+          <CardBody>
+            <VStack spacing={3}>
+              <HStack w="full" justify="space-between">
                 <Text fontSize="sm" fontWeight="medium">
-                  {formSubmitted 
-                    ? "✓ Response recorded successfully" 
-                    : "Please complete the evaluation form"}
+                  Study Progress
                 </Text>
-                <Text fontSize="xs" color="gray.500">
-                  {formSubmitted 
-                    ? "You can now proceed to the next image" 
-                    : "All questions must be answered before continuing"}
+                <Text fontSize="sm" color="gray.600">
+                  {completedImages.size} of {images.length} images completed
                 </Text>
-              </VStack>
-            </Alert>
-            
-            <HStack spacing={3}>
-              {currentIndex === images.length - 1 && (
-                <Text fontSize="sm" color="gray.600" fontStyle="italic">
-                  This is your final image
-                </Text>
-              )}
+              </HStack>
               
-              <Button
-                onClick={handleNext}
-                colorScheme={formSubmitted ? "green" : "gray"}
-                size="lg"
-                isDisabled={!formSubmitted}
-                leftIcon={currentIndex === images.length - 1 ? <CheckCircle /> : undefined}
-              >
-                {currentIndex === images.length - 1 ? 'Complete Study' : 'Next Image'}
-              </Button>
-            </HStack>
-          </Flex>
-        </Container>
-      </Box>
+              <Progress 
+                value={progressPercentage} 
+                size="lg" 
+                colorScheme="blue" 
+                w="full"
+                bg="gray.100"
+              />
+              
+              <HStack spacing={4} fontSize="sm" color="gray.600">
+                <HStack>
+                  <Icon as={Clock} size={16} />
+                  <Text>Estimated time remaining: {Math.max(0, (images.length - completedImages.size) * 2)} minutes</Text>
+                </HStack>
+                <HStack>
+                  <Icon as={CheckCircle} size={16} />
+                  <Text>{progressPercentage}% complete</Text>
+                </HStack>
+              </HStack>
+              
+              {completedImages.size === images.length && (
+                <Alert status="success" borderRadius="md">
+                  <AlertIcon />
+                  <Box>
+                    <AlertTitle>Study Complete!</AlertTitle>
+                    <AlertDescription>
+                      You have successfully evaluated all assigned images. 
+                      You will be redirected to the completion page shortly.
+                    </AlertDescription>
+                  </Box>
+                </Alert>
+              )}
+            </VStack>
+          </CardBody>
+        </Card>
+      </Container>
     </Box>
   );
 };

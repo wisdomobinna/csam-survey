@@ -1,164 +1,231 @@
-// src/pages/Setup.js
-import React, { useState } from 'react';
-import { Box, Button, Container, Heading, Text, VStack, Alert, AlertIcon, Code, Divider } from '@chakra-ui/react';
-import { initializeFirestore, verifySetup, checkInitializationStatus, clearAllData } from '../utils/firebaseSetup';
+// src/pages/Setup.js - Fixed Shield import
+
+import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import {
+  Box,
+  Container,
+  Heading,
+  Text,
+  Button,
+  VStack,
+  HStack,
+  Alert,
+  AlertIcon,
+  AlertTitle,
+  AlertDescription,
+  useToast,
+  Spinner,
+  Card,
+  CardBody,
+  Progress,
+  Icon,
+  Badge
+} from '@chakra-ui/react';
+
+// Fixed lucide-react import
+import { ShieldCheck, UserPlus, Database } from 'lucide-react';
+
+// Import Firebase setup functions
+import { assignImagesToUser } from '../utils/firebaseSetup';
+import { db } from '../firebase/config';
+import { collection, getDocs } from 'firebase/firestore';
 
 const Setup = () => {
+  const navigate = useNavigate();
+  const toast = useToast();
+  
   const [loading, setLoading] = useState(false);
-  const [clearing, setClearing] = useState(false);
-  const [message, setMessage] = useState('');
-  const [error, setError] = useState('');
-  const [status, setStatus] = useState(null);
+  const [setupComplete, setSetupComplete] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [currentStep, setCurrentStep] = useState('');
+  const [userCount, setUserCount] = useState(0);
 
-  const checkStatus = async () => {
+  // Check current setup status
+  useEffect(() => {
+    checkSetupStatus();
+  }, []);
+
+  const checkSetupStatus = async () => {
     try {
-      const currentStatus = await checkInitializationStatus();
-      setStatus(currentStatus);
-    } catch (err) {
-      console.error('Error checking status:', err);
-      setError(`Status check failed: ${err.message}`);
+      // Check if users already exist
+      const usersRef = collection(db, 'loginIDs');
+      const usersSnapshot = await getDocs(usersRef);
+      
+      let count = 0;
+      usersSnapshot.forEach((doc) => {
+        if (doc.id !== 'ADMIN') {
+          count++;
+        }
+      });
+      
+      setUserCount(count);
+      setSetupComplete(count > 0);
+      
+    } catch (error) {
+      console.error('Error checking setup status:', error);
     }
   };
 
-  const handleSetup = async () => {
-    setLoading(true);
-    setError('');
-    setMessage('');
-    
+  const runSetup = async () => {
     try {
-      const result = await initializeFirestore();
-      if (result) {
-        setMessage('Setup completed successfully! Users and images have been created.');
-        
-        // Verify the setup
-        const verification = await verifySetup();
-        console.log('Verification result:', verification);
-        
-        if (verification.success) {
-          setMessage(`Setup verified! Sample user: ${verification.sampleUser.loginId}`);
-        }
-      } else {
-        setMessage('Database already initialized.');
-      }
+      setLoading(true);
+      setProgress(0);
+      setCurrentStep('Initializing setup...');
+
+      // Create 10 test users
+      const totalUsers = 10;
       
-      await checkStatus();
-    } catch (err) {
-      console.error('Setup error:', err);
-      setError(`Setup failed: ${err.message}`);
-      
-      // Log more detailed error info
-      if (err.code) {
-        setError(`${err.code}: ${err.message}`);
+      for (let i = 1; i <= totalUsers; i++) {
+        setCurrentStep(`Creating user ${i} of ${totalUsers}...`);
+        setProgress((i / totalUsers) * 100);
+        
+        const userId = `USER_${String(i).padStart(3, '0')}`;
+        await assignImagesToUser(userId);
+        
+        // Small delay to show progress
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
+
+      setCurrentStep('Setup complete!');
+      setProgress(100);
+      setSetupComplete(true);
+      setUserCount(totalUsers);
+
+      toast({
+        title: 'Setup Completed',
+        description: `Successfully created ${totalUsers} users with image assignments`,
+        status: 'success',
+        duration: 5000,
+      });
+
+    } catch (error) {
+      console.error('Setup error:', error);
+      toast({
+        title: 'Setup Failed',
+        description: error.message,
+        status: 'error',
+        duration: 5000,
+      });
     } finally {
       setLoading(false);
     }
   };
 
-  const handleClearData = async () => {
-    if (!window.confirm('Are you sure you want to clear all data? This cannot be undone.')) {
-      return;
-    }
-
-    setClearing(true);
-    setError('');
-    setMessage('');
-
-    try {
-      await clearAllData();
-      setMessage('All data cleared successfully!');
-      await checkStatus();
-    } catch (err) {
-      console.error('Clear error:', err);
-      setError(`Failed to clear data: ${err.message}`);
-    } finally {
-      setClearing(false);
-    }
-  };
-
-  React.useEffect(() => {
-    checkStatus();
-  }, []);
-
   return (
-    <Container maxW="md" py={10}>
-      <VStack spacing={6}>
-        <Heading>Database Setup</Heading>
-        <Text>Initialize the database with users and images.</Text>
-        
-        {status && (
-          <Box w="full" p={4} bg="gray.100" borderRadius="md">
-            <Text fontWeight="bold">Current Status:</Text>
-            <Text>Images: {status.imageCount} / {status.expectedImages || 1000}</Text>
-            <Text>Users: {status.userCount} / {status.expectedUsers || 200}</Text>
-            <Text>Initialized: {status.initialized ? 'Yes' : 'No'}</Text>
-            {status.error && <Text color="red.500">Error: {status.error}</Text>}
-          </Box>
+    <Container maxW="2xl" py={8}>
+      <VStack spacing={8}>
+        {/* Header */}
+        <VStack spacing={4} textAlign="center">
+          <Icon as={Database} w={12} h={12} color="blue.500" />
+          <Heading>Study Setup</Heading>
+          <Text color="gray.600">
+            Initialize the study with test users and image assignments
+          </Text>
+        </VStack>
+
+        {/* Status Card */}
+        <Card w="full">
+          <CardBody>
+            <VStack spacing={4}>
+              <HStack justify="space-between" w="full">
+                <Text fontWeight="bold">Setup Status</Text>
+                <Badge 
+                  colorScheme={setupComplete ? 'green' : 'gray'}
+                  variant="subtle"
+                >
+                  {setupComplete ? 'Complete' : 'Not Started'}
+                </Badge>
+              </HStack>
+              
+              {setupComplete && (
+                <Alert status="success">
+                  <AlertIcon />
+                  <Box>
+                    <AlertTitle>Setup Complete!</AlertTitle>
+                    <AlertDescription>
+                      {userCount} users have been created with image assignments.
+                    </AlertDescription>
+                  </Box>
+                </Alert>
+              )}
+
+              {!setupComplete && (
+                <Alert status="info">
+                  <AlertIcon />
+                  <Box>
+                    <AlertTitle>Ready to Setup</AlertTitle>
+                    <AlertDescription>
+                      Click the button below to create test users and assign images.
+                    </AlertDescription>
+                  </Box>
+                </Alert>
+              )}
+            </VStack>
+          </CardBody>
+        </Card>
+
+        {/* Setup Progress */}
+        {loading && (
+          <Card w="full">
+            <CardBody>
+              <VStack spacing={4}>
+                <Text fontWeight="bold">Setup Progress</Text>
+                <Progress value={progress} w="full" colorScheme="blue" />
+                <Text fontSize="sm" color="gray.600">{currentStep}</Text>
+              </VStack>
+            </CardBody>
+          </Card>
         )}
-        
-        {message && (
-          <Alert status="success">
-            <AlertIcon />
-            {message}
-          </Alert>
-        )}
-        
-        {error && (
-          <Alert status="error">
-            <AlertIcon />
-            {error}
-          </Alert>
-        )}
-        
-        <VStack spacing={4} w="full">
+
+        {/* Setup Actions */}
+        <Card w="full">
+          <CardBody>
+            <VStack spacing={4}>
+              <Icon as={ShieldCheck} w={8} h={8} color="green.500" />
+              <Text fontWeight="bold">Setup Options</Text>
+              
+              <VStack spacing={3} w="full">
+                <Button
+                  colorScheme="blue"
+                  size="lg"
+                  leftIcon={<Icon as={UserPlus} />}
+                  onClick={runSetup}
+                  isLoading={loading}
+                  loadingText="Setting up..."
+                  isDisabled={setupComplete}
+                  w="full"
+                >
+                  {setupComplete ? 'Setup Already Complete' : 'Run Initial Setup'}
+                </Button>
+                
+                <Text fontSize="sm" color="gray.600" textAlign="center">
+                  This will create 10 test users and assign 10 images to each user
+                  (5 from set1, 5 from set2)
+                </Text>
+              </VStack>
+            </VStack>
+          </CardBody>
+        </Card>
+
+        {/* Navigation */}
+        <HStack spacing={4}>
           <Button
-            colorScheme="blue"
-            onClick={handleSetup}
-            isLoading={loading}
-            loadingText="Running setup..."
-            size="lg"
-            w="full"
+            variant="outline"
+            onClick={() => navigate('/admin')}
           >
-            Initialize Database
+            Back to Admin
           </Button>
           
-          <Button
-            colorScheme="red"
-            variant="outline"
-            onClick={handleClearData}
-            isLoading={clearing}
-            loadingText="Clearing data..."
-            size="sm"
-          >
-            Clear All Data
-          </Button>
-        </VStack>
-        
-        <Box w="full" p={4} bg="blue.50" borderRadius="md">
-          <Text fontWeight="bold" mb={2}>Sample Credentials:</Text>
-          <Code>Login ID: 0001, Password: a0001</Code>
-          <br />
-          <Code>Login ID: 0002, Password: b0002</Code>
-          <br />
-          <Code>Login ID: 0026, Password: z0026</Code>
-          <br />
-          <Code>Login ID: 0027, Password: a0027</Code>
-        </Box>
-        
-        <Divider />
-        
-        <Box w="full" p={4} bg="orange.50" borderRadius="md">
-          <Text fontWeight="bold" mb={2}>Troubleshooting:</Text>
-          <Text fontSize="sm">
-            1. Check Firebase Console → Firestore Rules
-            <br />
-            2. Ensure Firestore is enabled in your project
-            <br />
-            3. Check browser console for detailed errors
-            <br />
-            4. Verify Firebase configuration is correct
-          </Text>
-        </Box>
+          {setupComplete && (
+            <Button
+              colorScheme="green"
+              onClick={() => navigate('/admin/dashboard')}
+            >
+              Go to Dashboard
+            </Button>
+          )}
+        </HStack>
       </VStack>
     </Container>
   );
