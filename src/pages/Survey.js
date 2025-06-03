@@ -1,4 +1,4 @@
-// src/pages/Survey.js - Complete fixed version with proper image loading
+// src/pages/Survey.js - Fixed version without problematic imports
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
@@ -25,11 +25,9 @@ import {
   Heading,
   useToast,
   Spinner,
-  Icon,
   Flex,
   Divider,
 } from '@chakra-ui/react';
-import { ChevronLeft, ChevronRight, Eye, Clock, CheckCircle, ArrowRight } from 'lucide-react';
 
 const Survey = () => {
   const [images, setImages] = useState([]);
@@ -88,48 +86,111 @@ const Survey = () => {
         return;
       }
       
-      // Load image data with proper error handling
+      // Load image data with proper error handling and path construction
       const imagePromises = assignedImages.map(async (imageData, index) => {
         try {
           console.log(`Loading image ${index + 1}:`, imageData);
           
-          // Image data should already contain the download URL from assignment
-          if (imageData.url) {
+          // Check if image already has a valid URL
+          if (imageData.url && imageData.path) {
             return {
               ...imageData,
               loaded: true
             };
           }
           
-          // Fallback: if no URL, try to get it from storage
-          if (imageData.path) {
-            console.log(`Getting download URL for path: ${imageData.path}`);
-            const imageRef = ref(storage, imageData.path);
-            const downloadURL = await getDownloadURL(imageRef);
+          // Construct the proper path based on the storage structure
+          let imagePath;
+          let imageName;
+          let imageSet;
+          let imageId;
+          
+          // Case 1: Image has proper numeric name like "123.png"
+          if (imageData.name && imageData.name.match(/^\d+\.png$/)) {
+            const imageNumber = parseInt(imageData.name.replace('.png', ''));
+            imageSet = imageNumber <= 1200 ? 'set1' : 'set2';
+            imageName = imageData.name;
+            imagePath = `${imageSet}/${imageName}`;
+            imageId = `${imageSet}_${imageNumber}`;
+          }
+          
+          // Case 2: Image has set and name properties
+          else if (imageData.set && imageData.name) {
+            imageSet = imageData.set;
+            imageName = imageData.name;
+            imagePath = `${imageSet}/${imageName}`;
+            imageId = imageData.id || `${imageSet}_${imageName.replace('.png', '')}`;
+          }
+          
+          // Case 3: Image has path property
+          else if (imageData.path) {
+            imagePath = imageData.path;
+            const pathParts = imagePath.split('/');
+            imageSet = pathParts[0];
+            imageName = pathParts[1];
+            imageId = imageData.id || `${imageSet}_${imageName.replace('.png', '')}`;
+          }
+          
+          // Case 4: Old format names like "safe_adults_0019" - need to map these
+          else if (imageData.name && imageData.name.includes('_')) {
+            console.warn(`Old format image name detected: ${imageData.name}`);
             
-            return {
-              ...imageData,
-              url: downloadURL,
-              loaded: true
-            };
+            // Try to extract number from old format name
+            const numberMatch = imageData.name.match(/(\d+)$/);
+            if (numberMatch) {
+              const extractedNumber = parseInt(numberMatch[1]);
+              // Map to new format - this is a guess, you might need to adjust
+              const imageNumber = extractedNumber;
+              imageSet = imageNumber <= 1200 ? 'set1' : 'set2';
+              imageName = `${imageNumber}.png`;
+              imagePath = `${imageSet}/${imageName}`;
+              imageId = `${imageSet}_${imageNumber}`;
+              
+              console.log(`Mapped old format ${imageData.name} to ${imagePath}`);
+            } else {
+              throw new Error(`Cannot map old format image name: ${imageData.name}`);
+            }
           }
           
-          // Last resort: construct path from name and set
-          if (imageData.name && imageData.set) {
-            const constructedPath = `${imageData.set}/${imageData.name}`;
-            console.log(`Constructing path: ${constructedPath}`);
-            const imageRef = ref(storage, constructedPath);
-            const downloadURL = await getDownloadURL(imageRef);
-            
-            return {
-              ...imageData,
-              path: constructedPath,
-              url: downloadURL,
-              loaded: true
-            };
+          // Case 5: Image has ID in format "set1_123"
+          else if (imageData.id && imageData.id.includes('_')) {
+            const parts = imageData.id.split('_');
+            if (parts.length >= 2) {
+              imageSet = parts[0];
+              const imageNumber = parts[1];
+              imageName = `${imageNumber}.png`;
+              imagePath = `${imageSet}/${imageName}`;
+              imageId = imageData.id;
+            } else {
+              throw new Error(`Invalid image ID format: ${imageData.id}`);
+            }
           }
           
-          throw new Error(`Insufficient image data: ${JSON.stringify(imageData)}`);
+          else {
+            throw new Error(`Insufficient image data to construct path: ${JSON.stringify(imageData)}`);
+          }
+          
+          if (!imagePath) {
+            throw new Error(`Could not construct image path from: ${JSON.stringify(imageData)}`);
+          }
+          
+          console.log(`Constructed path: ${imagePath} for image:`, imageData);
+          
+          // Get download URL from Firebase Storage
+          const imageRef = ref(storage, imagePath);
+          const downloadURL = await getDownloadURL(imageRef);
+          
+          return {
+            id: imageId,
+            name: imageName,
+            set: imageSet,
+            path: imagePath,
+            url: downloadURL,
+            index: index,
+            loaded: true,
+            // Preserve any additional properties
+            ...imageData
+          };
           
         } catch (error) {
           console.error(`Error loading image ${index + 1}:`, error);
@@ -152,7 +213,12 @@ const Survey = () => {
       
       if (failedImages.length > 0) {
         console.error('Failed to load images:', failedImages);
-        console.error('This might indicate missing images in Firebase Storage or incorrect paths');
+        toast({
+          title: 'Some Images Failed to Load',
+          description: `${failedImages.length} out of ${loadedImages.length} images could not be loaded`,
+          status: 'warning',
+          duration: 5000,
+        });
       }
       
       if (validImages.length === 0) {
@@ -198,7 +264,7 @@ const Survey = () => {
     } finally {
       setLoading(false);
     }
-  }, [navigate]);
+  }, [navigate, toast]);
 
   // Initialize component
   useEffect(() => {
@@ -448,8 +514,8 @@ const Survey = () => {
                       {currentImage.set?.toUpperCase()} - {currentImage.name}
                     </Text>
                     {completedImages.has(currentImage.id) && (
-                      <Badge colorScheme="green" leftIcon={<CheckCircle size={12} />}>
-                        Completed
+                      <Badge colorScheme="green">
+                        ✅ Completed
                       </Badge>
                     )}
                   </HStack>
@@ -484,13 +550,12 @@ const Survey = () => {
                   {/* Image Navigation */}
                   <HStack spacing={2} w="full" justify="center">
                     <Button
-                      leftIcon={<ChevronLeft />}
                       size="sm"
                       variant="outline"
                       onClick={() => navigateToImage(currentImageIndex - 1)}
                       isDisabled={currentImageIndex === 0}
                     >
-                      Previous
+                      ⬅️ Previous
                     </Button>
                     
                     <Text fontSize="sm" color="gray.600" minW="100px" textAlign="center">
@@ -498,13 +563,12 @@ const Survey = () => {
                     </Text>
                     
                     <Button
-                      rightIcon={<ChevronRight />}
                       size="sm"
                       variant="outline"
                       onClick={() => navigateToImage(currentImageIndex + 1)}
                       isDisabled={currentImageIndex === images.length - 1}
                     >
-                      Next
+                      Next ➡️
                     </Button>
                   </HStack>
                 </VStack>
@@ -518,7 +582,7 @@ const Survey = () => {
               <CardHeader>
                 <HStack justify="space-between">
                   <HStack>
-                    <Icon as={Eye} color="blue.500" />
+                    <Text fontSize="lg">👁️</Text>
                     <Text fontWeight="bold">Image Evaluation Survey</Text>
                   </HStack>
                   {surveyLoading && (
@@ -592,11 +656,11 @@ const Survey = () => {
               
               <HStack spacing={4} fontSize="sm" color="gray.600">
                 <HStack>
-                  <Icon as={Clock} size={16} />
+                  <Text>🕒</Text>
                   <Text>Estimated time remaining: {Math.max(0, (images.length - completedImages.size) * 2)} minutes</Text>
                 </HStack>
                 <HStack>
-                  <Icon as={CheckCircle} size={16} />
+                  <Text>✅</Text>
                   <Text>{progressPercentage}% complete</Text>
                 </HStack>
               </HStack>

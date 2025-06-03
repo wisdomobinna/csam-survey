@@ -1,191 +1,354 @@
-// src/utils/simpleImageAssignment.js - Simple image assignment from Firebase Storage
-import { getStorage, ref, getDownloadURL } from 'firebase/storage';
-import { doc, setDoc, getDoc, updateDoc, arrayUnion, increment } from 'firebase/firestore';
-import { db } from '../firebase/config';
+// src/utils/fixUserAssignments.js - Fix existing user assignments with better mapping
+import { collection, getDocs, doc, updateDoc, getDoc } from 'firebase/firestore';
+import { ref, getDownloadURL } from 'firebase/storage';
+import { db, storage } from '../firebase/config';
 
-const storage = getStorage();
-
-// Get random numbers without replacement
-const getRandomNumbers = (min, max, count) => {
-  const numbers = [];
-  const available = [];
+// Mapping from old format names to new format
+const createImageMapping = () => {
+  const mapping = {};
   
-  // Create array of available numbers
-  for (let i = min; i <= max; i++) {
-    available.push(i);
-  }
+  // You'll need to create a proper mapping based on your actual data
+  // This is a placeholder - adjust according to your actual mapping needs
   
-  // Randomly select without replacement
-  for (let i = 0; i < count && available.length > 0; i++) {
-    const randomIndex = Math.floor(Math.random() * available.length);
-    numbers.push(available.splice(randomIndex, 1)[0]);
-  }
+  // Example mapping pattern - adjust this based on your actual image names
+  const oldFormatPatterns = [
+    'safe_adults_0001', 'safe_adults_0002', 'safe_adults_0003', 'safe_adults_0004', 'safe_adults_0005',
+    'safe_adults_0006', 'safe_adults_0007', 'safe_adults_0008', 'safe_adults_0009', 'safe_adults_0010',
+    'safe_adults_0011', 'safe_adults_0012', 'safe_adults_0013', 'safe_adults_0014', 'safe_adults_0015',
+    'safe_adults_0016', 'safe_adults_0017', 'safe_adults_0018', 'safe_adults_0019', 'safe_adults_0020'
+  ];
   
-  return numbers;
+  // Map to new format - this is just an example, adjust based on your needs
+  oldFormatPatterns.forEach((oldName, index) => {
+    const newImageNumber = index + 1; // Start from 1
+    const imageSet = newImageNumber <= 1200 ? 'set1' : 'set2';
+    const newImageName = `${newImageNumber}.png`;
+    
+    mapping[oldName] = {
+      set: imageSet,
+      name: newImageName,
+      path: `${imageSet}/${newImageName}`,
+      number: newImageNumber
+    };
+  });
+  
+  return mapping;
 };
 
-// Assign images to a user
-export const assignImagesToUser = async (userId) => {
+// Fix a single user's assignment data
+const fixUserAssignment = async (userId, userData) => {
   try {
-    console.log('Assigning images to user:', userId);
+    console.log(`Fixing assignments for user: ${userId}`);
     
-    // Get 5 random images from set1 (1-1200) and 5 from set2 (1201-2400)
-    const set1Numbers = getRandomNumbers(1, 1200, 5);
-    const set2Numbers = getRandomNumbers(1201, 2400, 5);
+    const assignedImages = userData.assignedImages || [];
     
-    const allAssignedImages = [];
-    
-    // Process set1 images
-    for (const num of set1Numbers) {
-      const imageName = `${num}.png`;
-      const imagePath = `set1/${imageName}`;
-      
-      try {
-        // Get download URL to verify image exists
-        const imageRef = ref(storage, imagePath);
-        const downloadURL = await getDownloadURL(imageRef);
-        
-        const imageData = {
-          imageId: `set1_${num}`,
-          imageName: imageName,
-          storagePath: imagePath,
-          downloadURL: downloadURL,
-          set: 'set1',
-          number: num,
-          assignedAt: new Date().toISOString(),
-          completed: false
-        };
-        
-        allAssignedImages.push(imageData);
-        
-        // Track image assignment in Firestore
-        await trackImageAssignment(imageData.imageId, userId);
-        
-        console.log(`Assigned set1 image: ${imageName}`);
-      } catch (error) {
-        console.warn(`Failed to assign set1 image ${imageName}:`, error);
-      }
+    if (assignedImages.length === 0) {
+      console.log(`User ${userId} has no assigned images, skipping`);
+      return { success: true, message: 'No images to fix' };
     }
     
-    // Process set2 images
-    for (const num of set2Numbers) {
-      const imageName = `${num}.png`;
-      const imagePath = `set2/${imageName}`;
-      
-      try {
-        // Get download URL to verify image exists
-        const imageRef = ref(storage, imagePath);
-        const downloadURL = await getDownloadURL(imageRef);
-        
-        const imageData = {
-          imageId: `set2_${num}`,
-          imageName: imageName,
-          storagePath: imagePath,
-          downloadURL: downloadURL,
-          set: 'set2',
-          number: num,
-          assignedAt: new Date().toISOString(),
-          completed: false
-        };
-        
-        allAssignedImages.push(imageData);
-        
-        // Track image assignment in Firestore
-        await trackImageAssignment(imageData.imageId, userId);
-        
-        console.log(`Assigned set2 image: ${imageName}`);
-      } catch (error) {
-        console.warn(`Failed to assign set2 image ${imageName}:`, error);
-      }
+    // Check if images are already in correct format
+    const hasValidUrls = assignedImages.every(img => img.url && img.path && img.name && img.name.match(/^\d+\.png$/));
+    if (hasValidUrls) {
+      console.log(`User ${userId} already has valid image assignments`);
+      return { success: true, message: 'Already fixed' };
     }
     
-    console.log(`Successfully assigned ${allAssignedImages.length} images to user ${userId}`);
-    return allAssignedImages;
+    console.log(`Fixing ${assignedImages.length} images for user ${userId}`);
+    
+    // Get the mapping for old format names
+    const imageMapping = createImageMapping();
+    
+    // Fix each image assignment
+    const fixedImages = await Promise.all(
+      assignedImages.map(async (imageData, index) => {
+        try {
+          // If already has URL and proper path, keep as is
+          if (imageData.url && imageData.path && imageData.name && imageData.name.match(/^\d+\.png$/)) {
+            return imageData;
+          }
+          
+          let imagePath;
+          let imageName;
+          let imageSet;
+          let imageNumber;
+          
+          // Case 1: Old format names like "safe_adults_0019"
+          if (imageData.name && imageData.name.includes('_')) {
+            console.log(`Processing old format image: ${imageData.name}`);
+            
+            if (imageMapping[imageData.name]) {
+              const mapped = imageMapping[imageData.name];
+              imageSet = mapped.set;
+              imageName = mapped.name;
+              imagePath = mapped.path;
+              imageNumber = mapped.number;
+            } else {
+              // Try to extract number from old format and guess mapping
+              const numberMatch = imageData.name.match(/(\d+)$/);
+              if (numberMatch) {
+                imageNumber = parseInt(numberMatch[1]);
+                imageSet = imageNumber <= 1200 ? 'set1' : 'set2';
+                imageName = `${imageNumber}.png`;
+                imagePath = `${imageSet}/${imageName}`;
+                console.log(`Mapped ${imageData.name} to ${imagePath} (guessed)`);
+              } else {
+                throw new Error(`Cannot map old format image: ${imageData.name}`);
+              }
+            }
+          }
+          
+          // Case 2: Image has numeric name like "123.png"
+          else if (imageData.name && imageData.name.match(/^\d+\.png$/)) {
+            imageNumber = parseInt(imageData.name.replace('.png', ''));
+            imageSet = imageNumber <= 1200 ? 'set1' : 'set2';
+            imageName = imageData.name;
+            imagePath = `${imageSet}/${imageName}`;
+          }
+          
+          // Case 3: Image has set and name properties
+          else if (imageData.set && imageData.name) {
+            imageSet = imageData.set;
+            imageName = imageData.name;
+            imagePath = `${imageSet}/${imageName}`;
+            const nameMatch = imageName.match(/(\d+)/);
+            imageNumber = nameMatch ? parseInt(nameMatch[1]) : null;
+          }
+          
+          // Case 4: Image has path property
+          else if (imageData.path) {
+            imagePath = imageData.path;
+            const pathParts = imagePath.split('/');
+            imageSet = pathParts[0];
+            imageName = pathParts[1];
+            const nameMatch = imageName.match(/(\d+)/);
+            imageNumber = nameMatch ? parseInt(nameMatch[1]) : null;
+          }
+          
+          // Case 5: Image has ID in format "set1_123"
+          else if (imageData.id && imageData.id.includes('_')) {
+            const parts = imageData.id.split('_');
+            if (parts.length >= 2) {
+              imageSet = parts[0];
+              imageNumber = parseInt(parts[1]);
+              imageName = `${imageNumber}.png`;
+              imagePath = `${imageSet}/${imageName}`;
+            } else {
+              throw new Error(`Invalid image ID format: ${imageData.id}`);
+            }
+          }
+          
+          else {
+            throw new Error(`Cannot determine path for image: ${JSON.stringify(imageData)}`);
+          }
+          
+          if (!imagePath) {
+            throw new Error(`Could not construct image path from: ${JSON.stringify(imageData)}`);
+          }
+          
+          console.log(`Constructed path: ${imagePath} for image:`, imageData);
+          
+          // Get download URL from Firebase Storage
+          const imageRef = ref(storage, imagePath);
+          const downloadURL = await getDownloadURL(imageRef);
+          
+          return {
+            id: `${imageSet}_${imageNumber}`,
+            name: imageName,
+            set: imageSet,
+            path: imagePath,
+            url: downloadURL,
+            index: index,
+            assignmentCount: imageData.assignmentCount || 1,
+            // Preserve any additional properties
+            originalData: imageData
+          };
+          
+        } catch (error) {
+          console.error(`Error fixing image ${index} for user ${userId}:`, error);
+          console.error('Image data:', imageData);
+          return null;
+        }
+      })
+    );
+    
+    // Filter out failed fixes
+    const validFixedImages = fixedImages.filter(img => img !== null);
+    
+    if (validFixedImages.length === 0) {
+      throw new Error('No images could be fixed - all image assignments failed');
+    }
+    
+    if (validFixedImages.length < assignedImages.length) {
+      console.warn(`Only ${validFixedImages.length}/${assignedImages.length} images could be fixed for user ${userId}`);
+    }
+    
+    // Update user document
+    const userRef = doc(db, 'loginIDs', userId);
+    const updateData = {
+      assignedImages: validFixedImages,
+      lastUpdated: new Date(),
+      imagesFix: 'applied',
+      totalImages: validFixedImages.length
+    };
+    
+    // If some images were completed, preserve that information
+    if (userData.completedImages && userData.completedImageIds) {
+      // Map old completed image IDs to new ones if possible
+      const newCompletedIds = [];
+      userData.completedImageIds.forEach(oldId => {
+        const fixedImage = validFixedImages.find(img => 
+          img.originalData?.name === oldId || 
+          img.originalData?.id === oldId ||
+          img.id === oldId ||
+          img.name === oldId
+        );
+        if (fixedImage) {
+          newCompletedIds.push(fixedImage.id);
+        }
+      });
+      
+      updateData.completedImageIds = newCompletedIds;
+      updateData.completedImages = newCompletedIds.length;
+    }
+    
+    await updateDoc(userRef, updateData);
+    
+    console.log(`Fixed ${validFixedImages.length}/${assignedImages.length} images for user ${userId}`);
+    
+    return {
+      success: true,
+      message: `Fixed ${validFixedImages.length}/${assignedImages.length} images`,
+      fixedCount: validFixedImages.length,
+      totalCount: assignedImages.length,
+      failedCount: assignedImages.length - validFixedImages.length
+    };
     
   } catch (error) {
-    console.error('Error in assignImagesToUser:', error);
+    console.error(`Error fixing user ${userId}:`, error);
+    return {
+      success: false,
+      message: error.message,
+      error: error
+    };
+  }
+};
+
+// Fix all users in the database
+export const fixAllUserAssignments = async () => {
+  try {
+    console.log('Starting to fix all user assignments...');
+    
+    const usersRef = collection(db, 'loginIDs');
+    const usersSnapshot = await getDocs(usersRef);
+    
+    console.log(`Found ${usersSnapshot.size} users to check`);
+    
+    const results = [];
+    let processedCount = 0;
+    
+    for (const userDoc of usersSnapshot.docs) {
+      const userId = userDoc.id;
+      const userData = userDoc.data();
+      
+      // Skip admin users
+      if (userId === 'ADMIN') {
+        continue;
+      }
+      
+      processedCount++;
+      console.log(`Processing user ${processedCount}/${usersSnapshot.size - 1}: ${userId}`);
+      
+      const result = await fixUserAssignment(userId, userData);
+      results.push({
+        userId,
+        ...result
+      });
+      
+      // Add small delay to avoid overwhelming Firebase
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    // Summary
+    const successful = results.filter(r => r.success);
+    const failed = results.filter(r => !r.success);
+    const alreadyFixed = successful.filter(r => r.message === 'Already fixed');
+    const actuallyFixed = successful.filter(r => r.message !== 'Already fixed' && r.message !== 'No images to fix');
+    
+    console.log('Fix completed:');
+    console.log(`- Total processed: ${results.length}`);
+    console.log(`- Successfully fixed: ${actuallyFixed.length}`);
+    console.log(`- Already fixed: ${alreadyFixed.length}`);
+    console.log(`- Failed: ${failed.length}`);
+    
+    if (failed.length > 0) {
+      console.log('Failed users:', failed.map(f => ({ userId: f.userId, error: f.message })));
+    }
+    
+    return {
+      total: results.length,
+      successful: successful.length,
+      actuallyFixed: actuallyFixed.length,
+      alreadyFixed: alreadyFixed.length,
+      failed: failed.length,
+      results
+    };
+    
+  } catch (error) {
+    console.error('Error in fixAllUserAssignments:', error);
     throw error;
   }
 };
 
-// Track which users have been assigned which images
-const trackImageAssignment = async (imageId, userId) => {
+// Fix specific user (useful for testing)
+export const fixSingleUser = async (userId) => {
   try {
-    const imageTrackingRef = doc(db, 'imageTracking', imageId);
-    const imageDoc = await getDoc(imageTrackingRef);
+    const userRef = doc(db, 'loginIDs', userId);
+    const userDoc = await getDoc(userRef);
     
-    if (imageDoc.exists()) {
-      // Update existing tracking document
-      await updateDoc(imageTrackingRef, {
-        assignedUsers: arrayUnion(userId),
-        assignmentCount: increment(1),
-        lastAssigned: new Date().toISOString()
-      });
-    } else {
-      // Create new tracking document
-      await setDoc(imageTrackingRef, {
-        imageId: imageId,
-        assignedUsers: [userId],
-        assignmentCount: 1,
-        createdAt: new Date().toISOString(),
-        lastAssigned: new Date().toISOString()
-      });
+    if (!userDoc.exists()) {
+      throw new Error(`User ${userId} not found`);
     }
     
-    console.log(`Tracked assignment of ${imageId} to ${userId}`);
+    return await fixUserAssignment(userId, userDoc.data());
   } catch (error) {
-    console.error(`Error tracking image assignment for ${imageId}:`, error);
-    // Don't throw - this is just tracking, shouldn't break image assignment
-  }
-};
-
-// Get image data for display in survey
-export const getImageData = async (imageId) => {
-  try {
-    // Parse imageId to get set and number (e.g., "set1_123" -> set: "set1", number: 123)
-    const [set, numberStr] = imageId.split('_');
-    const number = parseInt(numberStr);
-    
-    if (!set || !number) {
-      throw new Error(`Invalid image ID format: ${imageId}`);
-    }
-    
-    const imageName = `${number}.png`;
-    const storagePath = `${set}/${imageName}`;
-    
-    // Get download URL
-    const imageRef = ref(storage, storagePath);
-    const downloadURL = await getDownloadURL(imageRef);
-    
-    return {
-      imageId,
-      imageName,
-      storagePath,
-      downloadURL,
-      set,
-      number
-    };
-    
-  } catch (error) {
-    console.error(`Error getting image data for ${imageId}:`, error);
+    console.error(`Error fixing single user ${userId}:`, error);
     throw error;
   }
 };
 
-// Get assignment statistics for admin dashboard
-export const getImageAssignmentStats = async () => {
+// Helper function to manually create image assignments for problematic users
+export const reassignUserImages = async (userId, forceReassign = false) => {
   try {
-    // This would require listing all documents in imageTracking collection
-    // For now, return basic structure - you can enhance this later
+    const { assignImagesToUser } = await import('./firebaseSetup');
+    
+    // Get user data
+    const userRef = doc(db, 'loginIDs', userId);
+    const userDoc = await getDoc(userRef);
+    
+    if (!userDoc.exists()) {
+      throw new Error(`User ${userId} not found`);
+    }
+    
+    const userData = userDoc.data();
+    
+    if (!forceReassign && userData.assignedImages && userData.assignedImages.length > 0) {
+      throw new Error('User already has assigned images. Use forceReassign=true to override.');
+    }
+    
+    // Assign new images
+    const newImages = await assignImagesToUser(userId);
+    
+    console.log(`Reassigned ${newImages.length} images to user ${userId}`);
+    
     return {
-      totalImagesInSet1: 1200,
-      totalImagesInSet2: 1200,
-      assignedImagesSet1: 0, // Would need to count from Firestore
-      assignedImagesSet2: 0, // Would need to count from Firestore
-      totalAssignments: 0     // Would need to count from Firestore
+      success: true,
+      message: `Reassigned ${newImages.length} images`,
+      assignedImages: newImages
     };
+    
   } catch (error) {
-    console.error('Error getting image assignment stats:', error);
+    console.error(`Error reassigning images for user ${userId}:`, error);
     throw error;
   }
 };

@@ -1,7 +1,8 @@
-
-// src/pages/AdminDashboard.js - Fixed imports section
+// src/pages/AdminDashboard.js - Fixed version without problematic imports
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { collection, getDocs, doc, deleteDoc } from 'firebase/firestore';
+import { db } from '../firebase/config';
 import {
   Box,
   Container,
@@ -17,8 +18,7 @@ import {
   StatLabel,
   StatNumber,
   StatHelpText,
-  Grid,
-  GridItem,
+  SimpleGrid,
   Badge,
   Table,
   Thead,
@@ -34,14 +34,7 @@ import {
   AlertDescription,
   Spinner,
   Flex,
-  Icon,
-  Divider,
   Progress,
-  Tabs,
-  TabList,
-  TabPanels,
-  Tab,
-  TabPanel,
   Modal,
   ModalOverlay,
   ModalContent,
@@ -50,26 +43,15 @@ import {
   ModalBody,
   ModalCloseButton,
   useDisclosure,
-  OrderedList,  // Added this missing import
-  ListItem,     // Added this too
-  UnorderedList // And this one for good measure
+  UnorderedList,
+  ListItem,
+  InputGroup,
+  InputLeftElement,
+  Input,
+  Select,
+  Textarea,
+  Code
 } from '@chakra-ui/react';
-import {
-  Users,
-  Database,
-  Image as ImageIcon,
-  Download,
-  Trash2,
-  RefreshCw,
-  Settings,
-  BarChart3,
-  FileText,
-  ExternalLink,
-  Shield,
-  Tool,
-  CheckCircle,
-  AlertTriangle
-} from 'lucide-react';
 
 // Import your utilities
 import { fixAllUserAssignments } from '../utils/fixUserAssignments';
@@ -181,14 +163,18 @@ const AdminDashboard = () => {
       
       // Sort users by creation date (newest first)
       usersData.sort((a, b) => {
-        const dateA = a.createdAt?.seconds || 0;
-        const dateB = b.createdAt?.seconds || 0;
+        const dateA = a.createdAt?.toDate?.() || new Date(0);
+        const dateB = b.createdAt?.toDate?.() || new Date(0);
         return dateB - dateA;
       });
       
       setUsers(usersData);
       
-      // Update stats
+      // Calculate average completion rate
+      const averageCompletion = usersData.length > 0 
+        ? Math.round(totalCompletedImages / Math.max(totalAssignedImages, 1) * 100)
+        : 0;
+      
       setStats({
         totalUsers: usersData.length,
         completedSurveys: completedCount,
@@ -197,24 +183,27 @@ const AdminDashboard = () => {
         prolificUsers: prolificCount,
         totalImages: totalAssignedImages,
         assignedImages: totalAssignedImages,
-        averageCompletion: usersData.length > 0 ? Math.round(totalCompletedImages / totalAssignedImages * 100) || 0 : 0
+        averageCompletion
       });
       
-      // Load image assignment stats
+      // Load image assignment statistics
       try {
         const assignmentStats = await getAssignmentStats();
         setImageStats(assignmentStats);
       } catch (error) {
-        console.warn('Could not load image assignment stats:', error);
+        console.warn('Could not load image statistics:', error);
       }
       
-      console.log(`Loaded ${usersData.length} users`);
+      console.log('Dashboard data loaded:', {
+        users: usersData.length,
+        stats
+      });
       
     } catch (error) {
       console.error('Error loading dashboard data:', error);
-      setError('Failed to load dashboard data: ' + error.message);
+      setError(error.message);
       toast({
-        title: 'Error Loading Data',
+        title: 'Error Loading Dashboard',
         description: error.message,
         status: 'error',
         duration: 5000,
@@ -225,42 +214,34 @@ const AdminDashboard = () => {
   };
 
   const generateProlificUrl = () => {
-    const currentDomain = window.location.origin;
-    const prolificParams = 'PROLIFIC_PID={{%PROLIFIC_PID%}}&STUDY_ID={{%STUDY_ID%}}&SESSION_ID={{%SESSION_ID%}}';
-    const fullUrl = `${currentDomain}/login?${prolificParams}`;
+    const baseUrl = window.location.origin;
+    const prolificParams = new URLSearchParams({
+      PROLIFIC_PID: '{{%PROLIFIC_PID%}}',
+      STUDY_ID: '{{%STUDY_ID%}}',
+      SESSION_ID: '{{%SESSION_ID%}}'
+    });
+    
+    const fullUrl = `${baseUrl}/login?${prolificParams.toString()}`;
     setProlificUrl(fullUrl);
   };
 
-  const handleLogout = () => {
-    sessionStorage.clear();
-    toast({
-      title: 'Logged Out',
-      description: 'Admin session ended',
-      status: 'info',
-      duration: 2000,
-    });
-    navigate('/login');
-  };
-
-  const handleUserDetails = (user) => {
-    setSelectedUser(user);
-    onUserModalOpen();
-  };
-
   const handleDeleteUser = async (userId) => {
-    if (!window.confirm(`Are you sure you want to delete user ${userId}? This action cannot be undone.`)) {
+    if (!window.confirm(`Are you sure you want to delete user ${userId}? This cannot be undone.`)) {
       return;
     }
     
     try {
       await deleteDoc(doc(db, 'loginIDs', userId));
+      
       toast({
         title: 'User Deleted',
-        description: `User ${userId} has been deleted`,
+        description: `User ${userId} has been removed`,
         status: 'success',
         duration: 3000,
       });
-      await loadDashboardData();
+      
+      // Reload data
+      loadDashboardData();
     } catch (error) {
       console.error('Error deleting user:', error);
       toast({
@@ -272,57 +253,32 @@ const AdminDashboard = () => {
     }
   };
 
-  const handleResetAssignments = async () => {
-    if (!window.confirm('Are you sure you want to reset ALL image assignments? This will clear assignment counts for all images.')) {
+  const handleFixAssignments = async () => {
+    if (!window.confirm('Fix all user image assignments? This will update image paths for users with old format names.')) {
       return;
     }
     
     try {
       setLoading(true);
-      await resetImageAssignments();
-      toast({
-        title: 'Assignments Reset',
-        description: 'All image assignment counts have been reset',
-        status: 'success',
-        duration: 3000,
-      });
-      await loadDashboardData();
-    } catch (error) {
-      console.error('Error resetting assignments:', error);
-      toast({
-        title: 'Reset Failed',
-        description: error.message,
-        status: 'error',
-        duration: 5000,
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleFixAssignments = async () => {
-    try {
-      setLoading(true);
       
       toast({
-        title: 'Starting Fix Process',
-        description: 'Fixing user image assignments...',
+        title: 'Fixing Assignments',
+        description: 'This may take a few minutes...',
         status: 'info',
         duration: 3000,
       });
       
-      const results = await fixAllUserAssignments();
+      const result = await fixAllUserAssignments();
       
       toast({
-        title: 'Fix Completed',
-        description: `Fixed ${results.successful}/${results.total} users successfully`,
-        status: results.failed > 0 ? 'warning' : 'success',
+        title: 'Assignment Fix Complete',
+        description: `Fixed ${result.successful}/${result.total} users`,
+        status: result.failed > 0 ? 'warning' : 'success',
         duration: 5000,
       });
       
-      console.log('Fix results:', results);
-      await loadDashboardData();
-      
+      // Reload data
+      loadDashboardData();
     } catch (error) {
       console.error('Error fixing assignments:', error);
       toast({
@@ -336,874 +292,562 @@ const AdminDashboard = () => {
     }
   };
 
-  const exportUserData = () => {
-    const exportData = users.map(user => ({
-      userId: user.id,
-      displayId: user.displayId,
-      source: user.source,
-      isTest: user.isTest,
-      isProlific: user.isProlific,
-      surveyCompleted: user.isCompleted,
-      completedImages: user.completedImages,
-      totalImages: user.totalImages,
-      completionPercentage: user.completionPercentage,
-      createdAt: user.createdAt?.seconds ? new Date(user.createdAt.seconds * 1000).toISOString() : null,
-      lastLogin: user.lastLogin?.seconds ? new Date(user.lastLogin.seconds * 1000).toISOString() : null,
-      prolificPid: user.prolificData?.prolificPid,
-      studyId: user.prolificData?.studyId,
-      sessionId: user.prolificData?.sessionId
-    }));
+  const handleResetAssignments = async () => {
+    if (!window.confirm('Reset all image assignment counts? This will reset the tracking of how many times each image has been assigned.')) {
+      return;
+    }
     
-    const dataStr = JSON.stringify(exportData, null, 2);
-    const dataBlob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(dataBlob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `user-data-export-${new Date().toISOString().split('T')[0]}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-    
-    toast({
-      title: 'Data Exported',
-      description: 'User data has been exported to JSON file',
-      status: 'success',
-      duration: 3000,
-    });
+    try {
+      await resetImageAssignments();
+      
+      toast({
+        title: 'Assignments Reset',
+        description: 'Image assignment counts have been reset',
+        status: 'success',
+        duration: 3000,
+      });
+      
+      loadDashboardData();
+    } catch (error) {
+      console.error('Error resetting assignments:', error);
+      toast({
+        title: 'Reset Failed',
+        description: error.message,
+        status: 'error',
+        duration: 5000,
+      });
+    }
   };
 
-  const copyProlificUrl = () => {
-    navigator.clipboard.writeText(prolificUrl);
+  const handleClearAllData = async () => {
+    if (!window.confirm('WARNING: This will delete ALL user data except admin. This cannot be undone! Type "DELETE" to confirm.')) {
+      return;
+    }
+    
+    const confirmation = prompt('Type "DELETE" to confirm:');
+    if (confirmation !== 'DELETE') {
+      return;
+    }
+    
+    try {
+      await clearAllData();
+      
+      toast({
+        title: 'Data Cleared',
+        description: 'All user data has been removed',
+        status: 'success',
+        duration: 3000,
+      });
+      
+      loadDashboardData();
+    } catch (error) {
+      console.error('Error clearing data:', error);
+      toast({
+        title: 'Clear Failed',
+        description: error.message,
+        status: 'error',
+        duration: 5000,
+      });
+    }
+  };
+
+  const handleLogout = () => {
+    sessionStorage.clear();
     toast({
-      title: 'URL Copied',
-      description: 'Prolific URL copied to clipboard',
+      title: 'Logged Out',
+      description: 'Admin session ended',
+      status: 'info',
+      duration: 2000,
+    });
+    navigate('/login');
+  };
+
+  const copyToClipboard = (text) => {
+    navigator.clipboard.writeText(text);
+    toast({
+      title: 'Copied',
+      description: 'Text copied to clipboard',
       status: 'success',
       duration: 2000,
     });
   };
 
   const filteredUsers = users.filter(user => {
-    const matchesSearch = user.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         user.displayId?.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesSearch = searchTerm === '' || 
+      user.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (user.displayId && user.displayId.toLowerCase().includes(searchTerm.toLowerCase()));
     
     const matchesFilter = filterType === 'all' ||
-                         (filterType === 'completed' && user.isCompleted) ||
-                         (filterType === 'active' && !user.isCompleted && user.isActive) ||
-                         (filterType === 'test' && user.isTest) ||
-                         (filterType === 'prolific' && user.isProlific);
+      (filterType === 'test' && user.isTest) ||
+      (filterType === 'prolific' && user.isProlific) ||
+      (filterType === 'completed' && user.isCompleted) ||
+      (filterType === 'active' && user.isActive);
     
     return matchesSearch && matchesFilter;
   });
 
-  if (loading) {
+  const openUserDetails = (user) => {
+    setSelectedUser(user);
+    onUserModalOpen();
+  };
+
+  if (loading && users.length === 0) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minH="100vh">
+      <Flex minH="100vh" align="center" justify="center">
         <VStack spacing={4}>
           <Spinner size="xl" color="blue.500" />
           <Text>Loading admin dashboard...</Text>
         </VStack>
-      </Box>
-    );
-  }
-
-  if (error) {
-    return (
-      <Box display="flex" justifyContent="center" alignItems="center" minH="100vh">
-        <Alert status="error" maxW="md">
-          <AlertIcon />
-          <Box>
-            <Text fontWeight="bold">Dashboard Error</Text>
-            <Text>{error}</Text>
-          </Box>
-        </Alert>
-      </Box>
+      </Flex>
     );
   }
 
   return (
     <Box minH="100vh" bg="gray.50">
-      <Container maxW="7xl" py={8}>
-        {/* Header */}
-        <Flex justify="space-between" align="center" mb={8}>
-          <VStack align="start" spacing={1}>
-            <HStack>
-              <Icon as={Shield} color="green.500" size={24} />
-              <Heading size="lg">Admin Dashboard</Heading>
+      {/* Header */}
+      <Box bg="white" borderBottom="1px" borderColor="gray.200" py={4}>
+        <Container maxW="7xl">
+          <HStack justify="space-between">
+            <HStack spacing={3}>
+              <Text fontSize="2xl">🛡️</Text>
+              <VStack align="start" spacing={0}>
+                <Heading size="lg">Admin Dashboard</Heading>
+                <Text fontSize="sm" color="gray.600">
+                  Image Evaluation Study Management
+                </Text>
+              </VStack>
             </HStack>
-            <Text color="gray.600">Image Evaluation Study Management</Text>
-          </VStack>
-          
-          <HStack spacing={4}>
-            <Button
-              leftIcon={<RefreshCw />}
-              onClick={loadDashboardData}
-              isLoading={loading}
-              variant="outline"
-            >
-              Refresh
-            </Button>
-            <Button
-              leftIcon={<LogOut />}
-              onClick={handleLogout}
-              colorScheme="red"
-              variant="outline"
-            >
-              Logout
-            </Button>
+            
+            <HStack spacing={3}>
+              <Button
+                colorScheme="blue"
+                variant="outline"
+                onClick={() => navigate('/setup')}
+              >
+                🔧 System Setup
+              </Button>
+              <Button
+                colorScheme="green"
+                variant="outline"
+                onClick={onProlificModalOpen}
+              >
+                🔗 Prolific URL
+              </Button>
+              <Button
+                colorScheme="red"
+                variant="outline"
+                onClick={handleLogout}
+              >
+                🚪 Logout
+              </Button>
+            </HStack>
           </HStack>
-        </Flex>
+        </Container>
+      </Box>
 
-        <Tabs>
-          <TabList>
-            <Tab>Overview</Tab>
-            <Tab>Users</Tab>
-            <Tab>Image Management</Tab>
-            <Tab>Tools</Tab>
-          </TabList>
+      <Container maxW="7xl" py={6}>
+        {error && (
+          <Alert status="error" mb={6}>
+            <AlertIcon />
+            <AlertTitle>Dashboard Error:</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
 
-          <TabPanels>
-            {/* Overview Tab */}
-            <TabPanel>
-              <VStack spacing={6} align="stretch">
-                {/* Stats Cards */}
-                <SimpleGrid columns={{ base: 2, md: 4 }} spacing={4}>
-                  <Card>
-                    <CardBody>
-                      <Stat>
-                        <StatLabel>Total Users</StatLabel>
-                        <StatNumber>{stats.totalUsers}</StatNumber>
-                        <StatHelpText>
-                          <HStack spacing={2}>
-                            <Badge colorScheme="blue">{stats.prolificUsers} Prolific</Badge>
-                            <Badge colorScheme="orange">{stats.testUsers} Test</Badge>
-                          </HStack>
-                        </StatHelpText>
-                      </Stat>
-                    </CardBody>
-                  </Card>
+        {/* Statistics Overview */}
+        <SimpleGrid columns={{ base: 1, md: 2, lg: 4 }} spacing={6} mb={8}>
+          <Card>
+            <CardBody>
+              <Stat>
+                <StatLabel>Total Participants</StatLabel>
+                <StatNumber>{stats.totalUsers}</StatNumber>
+                <StatHelpText>
+                  <HStack spacing={1}>
+                    <Badge colorScheme="blue" size="sm">{stats.prolificUsers} Prolific</Badge>
+                    <Badge colorScheme="orange" size="sm">{stats.testUsers} Test</Badge>
+                  </HStack>
+                </StatHelpText>
+              </Stat>
+            </CardBody>
+          </Card>
 
-                  <Card>
-                    <CardBody>
-                      <Stat>
-                        <StatLabel>Completed Surveys</StatLabel>
-                        <StatNumber>{stats.completedSurveys}</StatNumber>
-                        <StatHelpText>
-                          {stats.totalUsers > 0 ? Math.round(stats.completedSurveys / stats.totalUsers * 100) : 0}% completion rate
-                        </StatHelpText>
-                      </Stat>
-                    </CardBody>
-                  </Card>
+          <Card>
+            <CardBody>
+              <Stat>
+                <StatLabel>Completed Studies</StatLabel>
+                <StatNumber>{stats.completedSurveys}</StatNumber>
+                <StatHelpText>
+                  {stats.totalUsers > 0 ? Math.round((stats.completedSurveys / stats.totalUsers) * 100) : 0}% completion rate
+                </StatHelpText>
+              </Stat>
+            </CardBody>
+          </Card>
 
-                  <Card>
-                    <CardBody>
-                      <Stat>
-                        <StatLabel>Active Users</StatLabel>
-                        <StatNumber>{stats.activeUsers}</StatNumber>
-                        <StatHelpText>
-                          Currently in progress
-                        </StatHelpText>
-                      </Stat>
-                    </CardBody>
-                  </Card>
+          <Card>
+            <CardBody>
+              <Stat>
+                <StatLabel>Image Evaluations</StatLabel>
+                <StatNumber>{stats.averageCompletion}%</StatNumber>
+                <StatHelpText>Average completion rate</StatHelpText>
+              </Stat>
+            </CardBody>
+          </Card>
 
-                  <Card>
-                    <CardBody>
-                      <Stat>
-                        <StatLabel>Image Progress</StatLabel>
-                        <StatNumber>{stats.averageCompletion}%</StatNumber>
-                        <StatHelpText>
-                          Average completion
-                        </StatHelpText>
-                      </Stat>
-                    </CardBody>
-                  </Card>
-                </SimpleGrid>
+          <Card>
+            <CardBody>
+              <Stat>
+                <StatLabel>Active Users</StatLabel>
+                <StatNumber>{stats.activeUsers}</StatNumber>
+                <StatHelpText>Currently participating</StatHelpText>
+              </Stat>
+            </CardBody>
+          </Card>
+        </SimpleGrid>
 
-                {/* Quick Actions */}
-                <Card>
-                  <CardHeader>
-                    <Heading size="md">Quick Actions</Heading>
-                  </CardHeader>
-                  <CardBody>
-                    <SimpleGrid columns={{ base: 1, md: 3 }} spacing={4}>
-                      <Button
-                        leftIcon={<Download />}
-                        onClick={exportUserData}
-                        colorScheme="blue"
-                        variant="outline"
-                      >
-                        Export User Data
-                      </Button>
-                      
-                      <Button
-                        leftIcon={<ExternalLink />}
-                        onClick={onProlificModalOpen}
-                        colorScheme="green"
-                        variant="outline"
-                      >
-                        Prolific Study URL
-                      </Button>
-                      
-                      <Button
-                        leftIcon={<BarChart3 />}
-                        onClick={onStatsModalOpen}
-                        colorScheme="purple"
-                        variant="outline"
-                      >
-                        Detailed Statistics
-                      </Button>
-                    </SimpleGrid>
-                  </CardBody>
-                </Card>
+        {/* Management Actions */}
+        <Card mb={6}>
+          <CardHeader>
+            <Heading size="md">Management Actions</Heading>
+          </CardHeader>
+          <CardBody>
+            <HStack spacing={4} wrap="wrap">
+              <Button
+                colorScheme="blue"
+                onClick={loadDashboardData}
+                isLoading={loading}
+              >
+                🔄 Refresh Data
+              </Button>
+              
+              <Button
+                colorScheme="orange"
+                variant="outline"
+                onClick={handleFixAssignments}
+              >
+                🔧 Fix User Assignments
+              </Button>
+              
+              <Button
+                colorScheme="purple"
+                variant="outline"
+                onClick={onStatsModalOpen}
+              >
+                📊 Image Statistics
+              </Button>
+              
+              <Button
+                colorScheme="yellow"
+                variant="outline"
+                onClick={handleResetAssignments}
+              >
+                🔄 Reset Assignment Counts
+              </Button>
+              
+              <Button
+                colorScheme="red"
+                variant="outline"
+                onClick={handleClearAllData}
+              >
+                🗑️ Clear All Data
+              </Button>
+            </HStack>
+          </CardBody>
+        </Card>
 
-                {/* Recent Activity */}
-                <Card>
-                  <CardHeader>
-                    <Heading size="md">Recent Users</Heading>
-                  </CardHeader>
-                  <CardBody>
-                    <TableContainer>
-                      <Table size="sm">
-                        <Thead>
-                          <Tr>
-                            <Th>User ID</Th>
-                            <Th>Type</Th>
-                            <Th>Progress</Th>
-                            <Th>Created</Th>
-                            <Th>Status</Th>
-                          </Tr>
-                        </Thead>
-                        <Tbody>
-                          {users.slice(0, 5).map(user => (
-                            <Tr key={user.id}>
-                              <Td fontFamily="mono" fontSize="sm">
-                                {user.displayId || user.id}
-                              </Td>
-                              <Td>
-                                <Badge colorScheme={user.isTest ? 'orange' : 'blue'}>
-                                  {user.isTest ? 'Test' : 'Prolific'}
-                                </Badge>
-                              </Td>
-                              <Td>
-                                <Progress 
-                                  value={user.completionPercentage} 
-                                  size="sm" 
-                                  colorScheme="green"
-                                  w="100px"
-                                />
-                              </Td>
-                              <Td fontSize="sm">
-                                {user.createdAt?.seconds 
-                                  ? new Date(user.createdAt.seconds * 1000).toLocaleDateString()
-                                  : 'N/A'
-                                }
-                              </Td>
-                              <Td>
-                                <Badge colorScheme={user.isCompleted ? 'green' : 'yellow'}>
-                                  {user.isCompleted ? 'Completed' : 'In Progress'}
-                                </Badge>
-                              </Td>
-                            </Tr>
-                          ))}
-                        </Tbody>
-                      </Table>
-                    </TableContainer>
-                  </CardBody>
-                </Card>
-              </VStack>
-            </TabPanel>
-
-            {/* Users Tab */}
-            <TabPanel>
-              <VStack spacing={4} align="stretch">
-                {/* Filters */}
-                <Card>
-                  <CardBody>
-                    <HStack spacing={4}>
-                      <InputGroup maxW="300px">
-                        <InputLeftElement>
-                          <Search size={16} />
-                        </InputLeftElement>
-                        <Input
-                          placeholder="Search users..."
-                          value={searchTerm}
-                          onChange={(e) => setSearchTerm(e.target.value)}
-                        />
-                      </InputGroup>
-                      
-                      <Select maxW="200px" value={filterType} onChange={(e) => setFilterType(e.target.value)}>
-                        <option value="all">All Users</option>
-                        <option value="completed">Completed</option>
-                        <option value="active">Active</option>
-                        <option value="test">Test Users</option>
-                        <option value="prolific">Prolific Users</option>
-                      </Select>
-                      
-                      <Text fontSize="sm" color="gray.600">
-                        {filteredUsers.length} of {users.length} users
-                      </Text>
-                    </HStack>
-                  </CardBody>
-                </Card>
-
-                {/* Users Table */}
-                <Card>
-                  <CardBody>
-                    <TableContainer>
-                      <Table>
-                        <Thead>
-                          <Tr>
-                            <Th>User ID</Th>
-                            <Th>Type</Th>
-                            <Th>Progress</Th>
-                            <Th>Completion</Th>
-                            <Th>Created</Th>
-                            <Th>Last Login</Th>
-                            <Th>Actions</Th>
-                          </Tr>
-                        </Thead>
-                        <Tbody>
-                          {filteredUsers.map(user => (
-                            <Tr key={user.id}>
-                              <Td>
-                                <VStack align="start" spacing={0}>
-                                  <Text fontFamily="mono" fontSize="sm">
-                                    {user.displayId || user.id}
-                                  </Text>
-                                  {user.prolificData?.prolificPid && (
-                                    <Text fontSize="xs" color="gray.500">
-                                      {user.prolificData.prolificPid.substring(0, 12)}...
-                                    </Text>
-                                  )}
-                                </VStack>
-                              </Td>
-                              <Td>
-                                <Badge colorScheme={user.isTest ? 'orange' : 'blue'}>
-                                  {user.isTest ? 'Test' : 'Prolific'}
-                                </Badge>
-                              </Td>
-                              <Td>
-                                <VStack align="start" spacing={1}>
-                                  <Progress 
-                                    value={user.completionPercentage} 
-                                    size="sm" 
-                                    colorScheme="green"
-                                    w="100px"
-                                  />
-                                  <Text fontSize="xs">
-                                    {user.completedImages}/{user.totalImages} images
-                                  </Text>
-                                </VStack>
-                              </Td>
-                              <Td>
-                                <Badge colorScheme={user.isCompleted ? 'green' : 'yellow'}>
-                                  {user.isCompleted ? 'Completed' : 'In Progress'}
-                                </Badge>
-                              </Td>
-                              <Td fontSize="sm">
-                                {user.createdAt?.seconds 
-                                  ? new Date(user.createdAt.seconds * 1000).toLocaleDateString()
-                                  : 'N/A'
-                                }
-                              </Td>
-                              <Td fontSize="sm">
-                                {user.lastLogin?.seconds 
-                                  ? new Date(user.lastLogin.seconds * 1000).toLocaleDateString()
-                                  : 'N/A'
-                                }
-                              </Td>
-                              <Td>
-                                <HStack spacing={2}>
-                                  <Button
-                                    size="sm"
-                                    leftIcon={<Eye />}
-                                    onClick={() => handleUserDetails(user)}
-                                    variant="outline"
-                                  >
-                                    View
-                                  </Button>
-                                  <Button
-                                    size="sm"
-                                    leftIcon={<Trash2 />}
-                                    onClick={() => handleDeleteUser(user.id)}
-                                    colorScheme="red"
-                                    variant="outline"
-                                  >
-                                    Delete
-                                  </Button>
-                                </HStack>
-                              </Td>
-                            </Tr>
-                          ))}
-                        </Tbody>
-                      </Table>
-                    </TableContainer>
-                  </CardBody>
-                </Card>
-              </VStack>
-            </TabPanel>
-
-            {/* Image Management Tab */}
-            <TabPanel>
-              <VStack spacing={4} align="stretch">
-                <Card>
-                  <CardHeader>
-                    <Heading size="md">Image Assignment Statistics</Heading>
-                  </CardHeader>
-                  <CardBody>
-                    {imageStats ? (
-                      <SimpleGrid columns={{ base: 1, md: 2 }} spacing={6}>
-                        <Box>
-                          <Text fontWeight="bold" mb={2}>Set 1 (1-1200.png)</Text>
-                          <VStack align="start" spacing={2}>
-                            {Object.entries(imageStats.set1).map(([count, images]) => (
-                              <HStack key={count} justify="space-between" w="full">
-                                <Text>{count} assignments:</Text>
-                                <Badge>{images} images</Badge>
-                              </HStack>
-                            ))}
-                          </VStack>
-                        </Box>
-                        
-                        <Box>
-                          <Text fontWeight="bold" mb={2}>Set 2 (1201-2400.png)</Text>
-                          <VStack align="start" spacing={2}>
-                            {Object.entries(imageStats.set2).map(([count, images]) => (
-                              <HStack key={count} justify="space-between" w="full">
-                                <Text>{count} assignments:</Text>
-                                <Badge>{images} images</Badge>
-                              </HStack>
-                            ))}
-                          </VStack>
-                        </Box>
-                      </SimpleGrid>
-                    ) : (
-                      <Text>No image statistics available</Text>
-                    )}
-                  </CardBody>
-                </Card>
-
-                <Card>
-                  <CardHeader>
-                    <Heading size="md">Image Management Actions</Heading>
-                  </CardHeader>
-                  <CardBody>
-                    <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
-                      <Button
-                        leftIcon={<AlertTriangle />}
-                        onClick={handleResetAssignments}
-                        colorScheme="red"
-                        variant="outline"
-                        isLoading={loading}
-                      >
-                        Reset All Assignments
-                      </Button>
-                      
-                      <Button
-                        leftIcon={<BarChart3 />}
-                        onClick={onStatsModalOpen}
-                        colorScheme="blue"
-                        variant="outline"
-                      >
-                        View Detailed Stats
-                      </Button>
-                    </SimpleGrid>
-                  </CardBody>
-                </Card>
-              </VStack>
-            </TabPanel>
-
-            {/* Tools Tab */}
-            <TabPanel>
-              <VStack spacing={4} align="stretch">
-                <Card>
-                  <CardHeader>
-                    <Heading size="md">System Tools</Heading>
-                  </CardHeader>
-                  <CardBody>
-                    <VStack spacing={4} align="stretch">
-                      <Box p={4} bg="orange.50" borderRadius="md" border="1px" borderColor="orange.200">
-                        <VStack spacing={3}>
-                          <HStack>
-                            <Icon as={Tool} color="orange.500" />
-                            <Text fontSize="lg" fontWeight="bold" color="orange.700">
-                              Fix User Assignments
-                            </Text>
-                          </HStack>
-                          <Text fontSize="sm" color="gray.600" textAlign="center">
-                            Update existing users to use the new image assignment format (set1/set2 structure)
+        {/* User Management */}
+        <Card>
+          <CardHeader>
+            <HStack justify="space-between">
+              <Heading size="md">Participant Management</Heading>
+              <HStack spacing={3}>
+                <InputGroup maxW="300px">
+                  <InputLeftElement>
+                    <Text>🔍</Text>
+                  </InputLeftElement>
+                  <Input
+                    placeholder="Search users..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                  />
+                </InputGroup>
+                
+                <Select
+                  value={filterType}
+                  onChange={(e) => setFilterType(e.target.value)}
+                  maxW="150px"
+                >
+                  <option value="all">All Users</option>
+                  <option value="prolific">Prolific</option>
+                  <option value="test">Test</option>
+                  <option value="completed">Completed</option>
+                  <option value="active">Active</option>
+                </Select>
+              </HStack>
+            </HStack>
+          </CardHeader>
+          <CardBody>
+            <TableContainer>
+              <Table variant="simple" size="sm">
+                <Thead>
+                  <Tr>
+                    <Th>User ID</Th>
+                    <Th>Type</Th>
+                    <Th>Progress</Th>
+                    <Th>Status</Th>
+                    <Th>Created</Th>
+                    <Th>Actions</Th>
+                  </Tr>
+                </Thead>
+                <Tbody>
+                  {filteredUsers.map(user => (
+                    <Tr key={user.id}>
+                      <Td>
+                        <VStack align="start" spacing={0}>
+                          <Text fontSize="sm" fontFamily="mono">
+                            {user.id.length > 20 ? `${user.id.substring(0, 20)}...` : user.id}
                           </Text>
-                          <Button
-                            colorScheme="orange"
-                            onClick={handleFixAssignments}
-                            isLoading={loading}
-                            loadingText="Fixing..."
-                            leftIcon={<Tool />}
-                          >
-                            Fix All User Assignments
-                          </Button>
-                        </VStack>
-                      </Box>
-
-                      <Box p={4} bg="blue.50" borderRadius="md" border="1px" borderColor="blue.200">
-                        <VStack spacing={3}>
-                          <HStack>
-                            <Icon as={ExternalLink} color="blue.500" />
-                            <Text fontSize="lg" fontWeight="bold" color="blue.700">
-                              Prolific Integration
+                          {user.displayId && user.displayId !== user.id && (
+                            <Text fontSize="xs" color="gray.500" fontFamily="mono">
+                              {user.displayId}
                             </Text>
-                          </HStack>
-                          <Text fontSize="sm" color="gray.600" textAlign="center">
-                            Generate and manage Prolific study URLs with proper parameter forwarding
-                          </Text>
-                          <Button
-                            colorScheme="blue"
-                            onClick={onProlificModalOpen}
-                            leftIcon={<ExternalLink />}
-                          >
-                            Manage Prolific URL
-                          </Button>
+                          )}
                         </VStack>
-                      </Box>
-
-                      <Box p={4} bg="green.50" borderRadius="md" border="1px" borderColor="green.200">
-                        <VStack spacing={3}>
-                          <HStack>
-                            <Icon as={Download} color="green.500" />
-                            <Text fontSize="lg" fontWeight="bold" color="green.700">
-                              Data Export
-                            </Text>
-                          </HStack>
-                          <Text fontSize="sm" color="gray.600" textAlign="center">
-                            Export user data and survey results for analysis and reporting
-                          </Text>
-                          <Button
-                            colorScheme="green"
-                            onClick={exportUserData}
-                            leftIcon={<Download />}
-                          >
-                            Export User Data
-                          </Button>
-                        </VStack>
-                      </Box>
-                    </VStack>
-                  </CardBody>
-                </Card>
-              </VStack>
-            </TabPanel>
-          </TabPanels>
-        </Tabs>
-
-        {/* User Details Modal */}
-        <Modal isOpen={isUserModalOpen} onClose={onUserModalClose} size="xl">
-          <ModalOverlay />
-          <ModalContent>
-            <ModalHeader>User Details</ModalHeader>
-            <ModalCloseButton />
-            <ModalBody>
-              {selectedUser && (
-                <VStack spacing={4} align="stretch">
-                  <SimpleGrid columns={2} spacing={4}>
-                    <Box>
-                      <Text fontWeight="bold">User ID:</Text>
-                      <Code>{selectedUser.id}</Code>
-                    </Box>
-                    <Box>
-                      <Text fontWeight="bold">Display ID:</Text>
-                      <Code>{selectedUser.displayId || 'N/A'}</Code>
-                    </Box>
-                    <Box>
-                      <Text fontWeight="bold">Source:</Text>
-                      <Badge colorScheme={selectedUser.isTest ? 'orange' : 'blue'}>
-                        {selectedUser.source || 'Unknown'}
-                      </Badge>
-                    </Box>
-                    <Box>
-                      <Text fontWeight="bold">Status:</Text>
-                      <Badge colorScheme={selectedUser.isCompleted ? 'green' : 'yellow'}>
-                        {selectedUser.isCompleted ? 'Completed' : 'In Progress'}
-                      </Badge>
-                    </Box>
-                  </SimpleGrid>
-
-                  <Divider />
-
-                  <Box>
-                    <Text fontWeight="bold" mb={2}>Progress:</Text>
-                    <Progress 
-                      value={selectedUser.completionPercentage} 
-                      colorScheme="green"
-                      size="lg"
-                      mb={2}
-                    />
-                    <Text fontSize="sm" color="gray.600">
-                      {selectedUser.completedImages}/{selectedUser.totalImages} images completed 
-                      ({selectedUser.completionPercentage}%)
-                    </Text>
-                  </Box>
-
-                  {selectedUser.prolificData && (
-                    <>
-                      <Divider />
-                      <Box>
-                        <Text fontWeight="bold" mb={2}>Prolific Data:</Text>
+                      </Td>
+                      <Td>
+                        <HStack spacing={1}>
+                          {user.isTest && <Badge colorScheme="orange" size="sm">Test</Badge>}
+                          {user.isProlific && <Badge colorScheme="blue" size="sm">Prolific</Badge>}
+                          {!user.isTest && !user.isProlific && <Badge colorScheme="gray" size="sm">Direct</Badge>}
+                        </HStack>
+                      </Td>
+                      <Td>
                         <VStack align="start" spacing={1}>
                           <Text fontSize="sm">
-                            <strong>Prolific PID:</strong> {selectedUser.prolificData.prolificPid}
+                            {user.completedImages}/{user.totalImages} images
                           </Text>
-                          <Text fontSize="sm">
-                            <strong>Study ID:</strong> {selectedUser.prolificData.studyId}
-                          </Text>
-                          <Text fontSize="sm">
-                            <strong>Session ID:</strong> {selectedUser.prolificData.sessionId}
-                          </Text>
+                          <Progress
+                            value={user.completionPercentage}
+                            size="sm"
+                            colorScheme={user.completionPercentage === 100 ? "green" : "blue"}
+                            w="100px"
+                          />
                         </VStack>
-                      </Box>
-                    </>
-                  )}
-
-                  <Divider />
-
-                  <Box>
-                    <Text fontWeight="bold" mb={2}>Timestamps:</Text>
-                    <VStack align="start" spacing={1}>
-                      <Text fontSize="sm">
-                        <strong>Created:</strong> {
-                          selectedUser.createdAt?.seconds 
-                            ? new Date(selectedUser.createdAt.seconds * 1000).toLocaleString()
-                            : 'N/A'
-                        }
-                      </Text>
-                      <Text fontSize="sm">
-                        <strong>Last Login:</strong> {
-                          selectedUser.lastLogin?.seconds 
-                            ? new Date(selectedUser.lastLogin.seconds * 1000).toLocaleString()
-                            : 'N/A'
-                        }
-                      </Text>
-                      {selectedUser.lastReturnVisit?.seconds && (
-                        <Text fontSize="sm">
-                          <strong>Last Return:</strong> {
-                            new Date(selectedUser.lastReturnVisit.seconds * 1000).toLocaleString()
-                          }
+                      </Td>
+                      <Td>
+                        <VStack align="start" spacing={0}>
+                          {user.isCompleted ? (
+                            <Badge colorScheme="green">
+                              ✅ Completed
+                            </Badge>
+                          ) : (
+                            <Badge colorScheme={user.isActive ? "blue" : "gray"}>
+                              {user.isActive ? "🔄 Active" : "⏸️ Inactive"}
+                            </Badge>
+                          )}
+                        </VStack>
+                      </Td>
+                      <Td>
+                        <Text fontSize="xs" color="gray.600">
+                          {user.createdAt?.toDate?.()?.toLocaleDateString() || 'Unknown'}
                         </Text>
-                      )}
-                    </VStack>
+                      </Td>
+                      <Td>
+                        <HStack spacing={1}>
+                          <Button
+                            size="xs"
+                            onClick={() => openUserDetails(user)}
+                          >
+                            👁️ View
+                          </Button>
+                          <Button
+                            size="xs"
+                            colorScheme="red"
+                            variant="outline"
+                            onClick={() => handleDeleteUser(user.id)}
+                          >
+                            🗑️ Delete
+                          </Button>
+                        </HStack>
+                      </Td>
+                    </Tr>
+                  ))}
+                </Tbody>
+              </Table>
+            </TableContainer>
+            
+            {filteredUsers.length === 0 && (
+              <Text textAlign="center" py={8} color="gray.500">
+                No users found matching your criteria
+              </Text>
+            )}
+          </CardBody>
+        </Card>
+      </Container>
+
+      {/* User Details Modal */}
+      <Modal isOpen={isUserModalOpen} onClose={onUserModalClose} size="xl">
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>User Details</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody pb={6}>
+            {selectedUser && (
+              <VStack spacing={4} align="start">
+                <SimpleGrid columns={2} spacing={4} w="full">
+                  <Box>
+                    <Text fontWeight="bold" mb={1}>Internal ID:</Text>
+                    <Code fontSize="xs">{selectedUser.id}</Code>
                   </Box>
-
-                  {selectedUser.assignedImages && selectedUser.assignedImages.length > 0 && (
-                    <>
-                      <Divider />
-                      <Box>
-                        <Text fontWeight="bold" mb={2}>Assigned Images:</Text>
-                        <TableContainer maxH="200px" overflowY="auto">
-                          <Table size="sm">
-                            <Thead>
-                              <Tr>
-                                <Th>Image</Th>
-                                <Th>Set</Th>
-                                <Th>Status</Th>
-                              </Tr>
-                            </Thead>
-                            <Tbody>
-                              {selectedUser.assignedImages.map((image, index) => (
-                                <Tr key={index}>
-                                  <Td fontFamily="mono" fontSize="xs">
-                                    {image.name || image.id || `Image ${index + 1}`}
-                                  </Td>
-                                  <Td>
-                                    <Badge size="sm" colorScheme={image.set === 'set1' ? 'blue' : 'green'}>
-                                      {image.set || 'Unknown'}
-                                    </Badge>
-                                  </Td>
-                                  <Td>
-                                    <Badge 
-                                      size="sm" 
-                                      colorScheme={index < selectedUser.completedImages ? 'green' : 'gray'}
-                                    >
-                                      {index < selectedUser.completedImages ? 'Completed' : 'Pending'}
-                                    </Badge>
-                                  </Td>
-                                </Tr>
-                              ))}
-                            </Tbody>
-                          </Table>
-                        </TableContainer>
-                      </Box>
-                    </>
-                  )}
-                </VStack>
-              )}
-            </ModalBody>
-            <ModalFooter>
-              <Button onClick={onUserModalClose}>Close</Button>
-            </ModalFooter>
-          </ModalContent>
-        </Modal>
-
-        {/* Statistics Modal */}
-        <Modal isOpen={isStatsModalOpen} onClose={onStatsModalClose} size="xl">
-          <ModalOverlay />
-          <ModalContent>
-            <ModalHeader>Detailed Statistics</ModalHeader>
-            <ModalCloseButton />
-            <ModalBody>
-              <VStack spacing={6} align="stretch">
-                <SimpleGrid columns={2} spacing={4}>
-                  <Box p={4} bg="blue.50" borderRadius="md">
-                    <Text fontWeight="bold" color="blue.700">User Statistics</Text>
-                    <VStack align="start" mt={2}>
-                      <Text fontSize="sm">Total Users: {stats.totalUsers}</Text>
-                      <Text fontSize="sm">Prolific Users: {stats.prolificUsers}</Text>
-                      <Text fontSize="sm">Test Users: {stats.testUsers}</Text>
-                      <Text fontSize="sm">Completed: {stats.completedSurveys}</Text>
-                      <Text fontSize="sm">Active: {stats.activeUsers}</Text>
-                    </VStack>
+                  <Box>
+                    <Text fontWeight="bold" mb={1}>Display ID:</Text>
+                    <Code fontSize="xs">{selectedUser.displayId || 'N/A'}</Code>
                   </Box>
-
-                  <Box p={4} bg="green.50" borderRadius="md">
-                    <Text fontWeight="bold" color="green.700">Image Statistics</Text>
-                    <VStack align="start" mt={2}>
-                      <Text fontSize="sm">Total Images Assigned: {stats.totalImages}</Text>
-                      <Text fontSize="sm">Average Completion: {stats.averageCompletion}%</Text>
-                      <Text fontSize="sm">Set 1 Images: 1200</Text>
-                      <Text fontSize="sm">Set 2 Images: 1200</Text>
-                    </VStack>
+                  <Box>
+                    <Text fontWeight="bold" mb={1}>Progress:</Text>
+                    <Text>{selectedUser.completedImages}/{selectedUser.totalImages} images ({selectedUser.completionPercentage}%)</Text>
+                  </Box>
+                  <Box>
+                    <Text fontWeight="bold" mb={1}>Status:</Text>
+                    <Badge colorScheme={selectedUser.isCompleted ? "green" : "blue"}>
+                      {selectedUser.isCompleted ? "Completed" : "In Progress"}
+                    </Badge>
                   </Box>
                 </SimpleGrid>
-
-                {imageStats && (
-                  <Box>
-                    <Text fontWeight="bold" mb={4}>Image Assignment Distribution</Text>
-                    <SimpleGrid columns={2} spacing={4}>
-                      <Box p={4} border="1px" borderColor="gray.200" borderRadius="md">
-                        <Text fontWeight="medium" mb={2}>Set 1 (Images 1-1200)</Text>
-                        <VStack align="start" spacing={1}>
-                          {Object.entries(imageStats.set1).map(([assignments, count]) => (
-                            <HStack key={assignments} justify="space-between" w="full">
-                              <Text fontSize="sm">{assignments} assignments:</Text>
-                              <Badge>{count} images</Badge>
-                            </HStack>
-                          ))}
-                        </VStack>
-                      </Box>
-
-                      <Box p={4} border="1px" borderColor="gray.200" borderRadius="md">
-                        <Text fontWeight="medium" mb={2}>Set 2 (Images 1201-2400)</Text>
-                        <VStack align="start" spacing={1}>
-                          {Object.entries(imageStats.set2).map(([assignments, count]) => (
-                            <HStack key={assignments} justify="space-between" w="full">
-                              <Text fontSize="sm">{assignments} assignments:</Text>
-                              <Badge>{count} images</Badge>
-                            </HStack>
-                          ))}
-                        </VStack>
-                      </Box>
-                    </SimpleGrid>
+                
+                {selectedUser.prolificData && (
+                  <Box w="full">
+                    <Text fontWeight="bold" mb={2}>Prolific Data:</Text>
+                    <Box bg="gray.50" p={3} borderRadius="md">
+                      <VStack align="start" spacing={1}>
+                        <Text fontSize="sm">PID: <Code fontSize="xs">{selectedUser.prolificData.prolificPid}</Code></Text>
+                        <Text fontSize="sm">Study ID: <Code fontSize="xs">{selectedUser.prolificData.studyId}</Code></Text>
+                        <Text fontSize="sm">Session ID: <Code fontSize="xs">{selectedUser.prolificData.sessionId}</Code></Text>
+                      </VStack>
+                    </Box>
                   </Box>
                 )}
-
-                <Box p={4} bg="yellow.50" borderRadius="md">
-                  <Text fontWeight="bold" color="yellow.700" mb={2}>System Health</Text>
-                  <VStack align="start" spacing={1}>
-                    <HStack>
-                      <Icon as={CheckCircle} color="green.500" />
-                      <Text fontSize="sm">Database: Connected</Text>
-                    </HStack>
-                    <HStack>
-                      <Icon as={CheckCircle} color="green.500" />
-                      <Text fontSize="sm">Storage: Accessible</Text>
-                    </HStack>
-                    <HStack>
-                      <Icon as={CheckCircle} color="green.500" />
-                      <Text fontSize="sm">Authentication: Active</Text>
-                    </HStack>
-                    <HStack>
-                      <Icon as={Database} color="blue.500" />
-                      <Text fontSize="sm">Total Collections: 2 (loginIDs, imageAssignments)</Text>
-                    </HStack>
-                  </VStack>
-                </Box>
+                
+                {selectedUser.assignedImages && (
+                  <Box w="full">
+                    <Text fontWeight="bold" mb={2}>Assigned Images:</Text>
+                    <Box maxH="200px" overflowY="auto">
+                      <UnorderedList spacing={1}>
+                        {selectedUser.assignedImages.map((img, idx) => (
+                          <ListItem key={idx} fontSize="sm">
+                            <Code fontSize="xs">{img.id || img.name}</Code> - {img.set}
+                            {selectedUser.completedImageIds?.includes(img.id || img.name) && (
+                              <Badge ml={2} colorScheme="green" size="sm">Completed</Badge>
+                            )}
+                          </ListItem>
+                        ))}
+                      </UnorderedList>
+                    </Box>
+                  </Box>
+                )}
               </VStack>
-            </ModalBody>
-            <ModalFooter>
-              <Button onClick={onStatsModalClose}>Close</Button>
-            </ModalFooter>
-          </ModalContent>
-        </Modal>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button onClick={onUserModalClose}>Close</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
 
-        {/* Prolific URL Modal */}
-        <Modal isOpen={isProlificModalOpen} onClose={onProlificModalClose} size="xl">
-          <ModalOverlay />
-          <ModalContent>
-            <ModalHeader>Prolific Study URL</ModalHeader>
-            <ModalCloseButton />
-            <ModalBody>
-              <VStack spacing={4} align="stretch">
-                <Box>
-                  <Text fontWeight="bold" mb={2}>Study URL for Prolific:</Text>
-                  <Text fontSize="sm" color="gray.600" mb={2}>
-                    Copy this URL and paste it into your Prolific study setup. The parameters will be 
-                    automatically populated by Prolific.
-                  </Text>
-                  <Textarea
-                    value={prolificUrl}
-                    isReadOnly
-                    bg="gray.50"
-                    fontFamily="mono"
-                    fontSize="sm"
-                    rows={3}
-                  />
-                  <Button
-                    mt={2}
-                    leftIcon={<Copy />}
-                    onClick={copyProlificUrl}
-                    colorScheme="blue"
-                    size="sm"
-                  >
-                    Copy URL
+      {/* Image Statistics Modal */}
+      <Modal isOpen={isStatsModalOpen} onClose={onStatsModalClose} size="lg">
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>Image Assignment Statistics</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody pb={6}>
+            {imageStats ? (
+              <VStack spacing={6}>
+                <SimpleGrid columns={2} spacing={6} w="full">
+                  <Card>
+                    <CardHeader>
+                      <Heading size="sm">Set 1 (Images 1-1200)</Heading>
+                    </CardHeader>
+                    <CardBody>
+                      <VStack spacing={2} align="start">
+                        {Object.entries(imageStats.set1 || {}).map(([assignments, count]) => (
+                          <HStack key={assignments} justify="space-between" w="full">
+                            <Text fontSize="sm">{assignments} assignments:</Text>
+                            <Badge>{count} images</Badge>
+                          </HStack>
+                        ))}
+                      </VStack>
+                    </CardBody>
+                  </Card>
+                  
+                  <Card>
+                    <CardHeader>
+                      <Heading size="sm">Set 2 (Images 1201-2400)</Heading>
+                    </CardHeader>
+                    <CardBody>
+                      <VStack spacing={2} align="start">
+                        {Object.entries(imageStats.set2 || {}).map(([assignments, count]) => (
+                          <HStack key={assignments} justify="space-between" w="full">
+                            <Text fontSize="sm">{assignments} assignments:</Text>
+                            <Badge>{count} images</Badge>
+                          </HStack>
+                        ))}
+                      </VStack>
+                    </CardBody>
+                  </Card>
+                </SimpleGrid>
+              </VStack>
+            ) : (
+              <Text>Loading statistics...</Text>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button onClick={onStatsModalClose}>Close</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Prolific URL Modal */}
+      <Modal isOpen={isProlificModalOpen} onClose={onProlificModalClose} size="lg">
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>Prolific Study URL</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody pb={6}>
+            <VStack spacing={4}>
+              <Text fontSize="sm" color="gray.600">
+                Use this URL as your study link in Prolific. The placeholders will be automatically replaced with participant data.
+              </Text>
+              
+              <Box w="full">
+                <HStack mb={2}>
+                  <Text fontWeight="bold">Study URL:</Text>
+                  <Button size="xs" onClick={() => copyToClipboard(prolificUrl)}>
+                    📋 Copy
                   </Button>
-                </Box>
-
-                <Divider />
-
-                <Box>
-                  <Text fontWeight="bold" mb={2}>Instructions:</Text>
-                  <OrderedList spacing={2} fontSize="sm">
-                    <li>Log into your Prolific account</li>
-                    <li>Create a new study or edit an existing one</li>
-                    <li>In the "Study Link" field, paste the URL above</li>
-                    <li>Prolific will automatically replace the placeholder parameters</li>
-                    <li>Participants will be automatically tracked when they access the study</li>
-                  </OrderedList>
-                </Box>
-
-                <Box p={4} bg="blue.50" borderRadius="md">
-                  <Text fontWeight="medium" color="blue.700" mb={2}>URL Parameters Explained:</Text>
-                  <VStack align="start" spacing={1} fontSize="sm">
-                    <Text><Code>PROLIFIC_PID</Code> - Unique participant identifier</Text>
-                    <Text><Code>STUDY_ID</Code> - Your Prolific study identifier</Text>
-                    <Text><Code>SESSION_ID</Code> - Individual session identifier</Text>
-                  </VStack>
-                </Box>
-
-                <Alert status="info" size="sm">
-                  <AlertIcon />
-                  <Text fontSize="sm">
-                    Test the URL by adding <Code>?PROLIFIC_PID=TEST_USER&STUDY_ID=TEST_STUDY&SESSION_ID=TEST_SESSION</Code> 
-                    to test the participant flow.
-                  </Text>
-                </Alert>
-              </VStack>
-            </ModalBody>
-            <ModalFooter>
-              <Button colorScheme="blue" onClick={copyProlificUrl} mr={3}>
-                Copy URL
-              </Button>
-              <Button onClick={onProlificModalClose}>Close</Button>
-            </ModalFooter>
-          </ModalContent>
-        </Modal>
-      </Container>
+                </HStack>
+                <Textarea
+                  value={prolificUrl}
+                  isReadOnly
+                  fontFamily="mono"
+                  fontSize="sm"
+                  rows={4}
+                />
+              </Box>
+              
+              <Alert status="info" size="sm">
+                <AlertIcon />
+                <Text fontSize="sm">
+                  Make sure to set the completion URL in Prolific to redirect participants 
+                  back after they finish the study.
+                </Text>
+              </Alert>
+            </VStack>
+          </ModalBody>
+          <ModalFooter>
+            <Button onClick={onProlificModalClose}>Close</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
     </Box>
   );
 };
