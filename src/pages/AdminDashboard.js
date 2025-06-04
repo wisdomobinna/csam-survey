@@ -1,8 +1,14 @@
-// src/pages/AdminDashboard.js - Fixed version without problematic imports
+// src/components/AdminDashboard.js - Updated for pre-assigned login system
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { collection, getDocs, doc, deleteDoc } from 'firebase/firestore';
+import { collection, getDocs } from 'firebase/firestore';
 import { db } from '../firebase/config';
+import {
+  createPreAssignments,
+  getSystemStats,
+  resetPreAssignedSystem,
+  getAvailableLoginIdsList
+} from '../utils/preAssignedSystem';
 import {
   Box,
   Container,
@@ -49,42 +55,22 @@ import {
   InputLeftElement,
   Input,
   Select,
-  Textarea,
   Code
 } from '@chakra-ui/react';
-
-// Import your utilities
-import { fixAllUserAssignments } from '../utils/fixUserAssignments';
-import { 
-  getAssignmentStats, 
-  resetImageAssignments, 
-  verifySetup, 
-  clearAllData 
-} from '../utils/firebaseSetup';
 
 const AdminDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [users, setUsers] = useState([]);
-  const [stats, setStats] = useState({
-    totalUsers: 0,
-    completedSurveys: 0,
-    activeUsers: 0,
-    testUsers: 0,
-    prolificUsers: 0,
-    totalImages: 0,
-    assignedImages: 0,
-    averageCompletion: 0
-  });
-  const [imageStats, setImageStats] = useState(null);
-  const [selectedUser, setSelectedUser] = useState(null);
+  const [systemStats, setSystemStats] = useState(null);
+  const [activeSessions, setActiveSessions] = useState([]);
+  const [availableIds, setAvailableIds] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterType, setFilterType] = useState('all');
-  const [prolificUrl, setProlificUrl] = useState('');
+  const [selectedSession, setSelectedSession] = useState(null);
 
-  const { isOpen: isUserModalOpen, onOpen: onUserModalOpen, onClose: onUserModalClose } = useDisclosure();
+  const { isOpen: isSessionModalOpen, onOpen: onSessionModalOpen, onClose: onSessionModalClose } = useDisclosure();
   const { isOpen: isStatsModalOpen, onOpen: onStatsModalOpen, onClose: onStatsModalClose } = useDisclosure();
-  const { isOpen: isProlificModalOpen, onOpen: onProlificModalOpen, onClose: onProlificModalClose } = useDisclosure();
+  const { isOpen: isSetupModalOpen, onOpen: onSetupModalOpen, onClose: onSetupModalClose } = useDisclosure();
 
   const navigate = useNavigate();
   const toast = useToast();
@@ -105,7 +91,6 @@ const AdminDashboard = () => {
     }
     
     loadDashboardData();
-    generateProlificUrl();
   }, [navigate, toast]);
 
   const loadDashboardData = async () => {
@@ -113,90 +98,49 @@ const AdminDashboard = () => {
       setLoading(true);
       console.log('Loading admin dashboard data...');
       
-      // Load users
-      const usersRef = collection(db, 'loginIDs');
-      const usersSnapshot = await getDocs(usersRef);
+      // Load system statistics
+      const stats = await getSystemStats();
+      setSystemStats(stats);
       
-      const usersData = [];
-      let completedCount = 0;
-      let activeCount = 0;
-      let testCount = 0;
-      let prolificCount = 0;
-      let totalAssignedImages = 0;
-      let totalCompletedImages = 0;
+      // Load active sessions
+      const sessionsRef = collection(db, 'loginIDs');
+      const sessionsSnapshot = await getDocs(sessionsRef);
       
-      usersSnapshot.forEach(doc => {
-        const userData = doc.data();
-        const userId = doc.id;
+      const sessions = [];
+      sessionsSnapshot.forEach(doc => {
+        if (doc.id === 'ADMIN') return;
         
-        // Skip admin user
-        if (userId === 'ADMIN') return;
-        
-        const isTest = userData.source === 'test' || userData.prolificData?.isTestUser || userId.includes('TEST');
-        const isProlific = userData.source === 'prolific' && !isTest;
-        const isCompleted = userData.surveyCompleted || false;
-        const isActive = userData.isActive !== false;
-        
-        usersData.push({
-          id: userId,
-          displayId: userData.displayId || userId,
-          ...userData,
-          isTest,
-          isProlific,
-          isCompleted,
-          isActive,
-          completedImages: userData.completedImages || 0,
-          totalImages: userData.assignedImages?.length || 0,
-          completionPercentage: userData.assignedImages?.length > 0 
-            ? Math.round((userData.completedImages || 0) / userData.assignedImages.length * 100)
-            : 0
+        const sessionData = doc.data();
+        sessions.push({
+          loginId: doc.id,
+          prolificPid: sessionData.prolificPid || 'N/A',
+          hasConsented: sessionData.hasConsented || false,
+          surveyCompleted: sessionData.surveyCompleted || false,
+          completedImages: sessionData.completedImages || 0,
+          totalImages: sessionData.totalImages || 0,
+          createdAt: sessionData.createdAt,
+          lastLogin: sessionData.lastLogin,
+          source: sessionData.source || 'unknown'
         });
-        
-        if (isCompleted) completedCount++;
-        if (isActive) activeCount++;
-        if (isTest) testCount++;
-        if (isProlific) prolificCount++;
-        
-        totalAssignedImages += userData.assignedImages?.length || 0;
-        totalCompletedImages += userData.completedImages || 0;
       });
       
-      // Sort users by creation date (newest first)
-      usersData.sort((a, b) => {
+      // Sort sessions by creation date (newest first)
+      sessions.sort((a, b) => {
         const dateA = a.createdAt?.toDate?.() || new Date(0);
         const dateB = b.createdAt?.toDate?.() || new Date(0);
         return dateB - dateA;
       });
       
-      setUsers(usersData);
+      setActiveSessions(sessions);
       
-      // Calculate average completion rate
-      const averageCompletion = usersData.length > 0 
-        ? Math.round(totalCompletedImages / Math.max(totalAssignedImages, 1) * 100)
-        : 0;
-      
-      setStats({
-        totalUsers: usersData.length,
-        completedSurveys: completedCount,
-        activeUsers: activeCount,
-        testUsers: testCount,
-        prolificUsers: prolificCount,
-        totalImages: totalAssignedImages,
-        assignedImages: totalAssignedImages,
-        averageCompletion
-      });
-      
-      // Load image assignment statistics
-      try {
-        const assignmentStats = await getAssignmentStats();
-        setImageStats(assignmentStats);
-      } catch (error) {
-        console.warn('Could not load image statistics:', error);
-      }
+      // Load some available login IDs for monitoring
+      const available = await getAvailableLoginIdsList(20);
+      setAvailableIds(available);
       
       console.log('Dashboard data loaded:', {
-        users: usersData.length,
-        stats
+        stats,
+        activeSessions: sessions.length,
+        availableIds: available.length
       });
       
     } catch (error) {
@@ -213,48 +157,8 @@ const AdminDashboard = () => {
     }
   };
 
-  const generateProlificUrl = () => {
-    const baseUrl = window.location.origin;
-    const prolificParams = new URLSearchParams({
-      PROLIFIC_PID: '{{%PROLIFIC_PID%}}',
-      STUDY_ID: '{{%STUDY_ID%}}',
-      SESSION_ID: '{{%SESSION_ID%}}'
-    });
-    
-    const fullUrl = `${baseUrl}/login?${prolificParams.toString()}`;
-    setProlificUrl(fullUrl);
-  };
-
-  const handleDeleteUser = async (userId) => {
-    if (!window.confirm(`Are you sure you want to delete user ${userId}? This cannot be undone.`)) {
-      return;
-    }
-    
-    try {
-      await deleteDoc(doc(db, 'loginIDs', userId));
-      
-      toast({
-        title: 'User Deleted',
-        description: `User ${userId} has been removed`,
-        status: 'success',
-        duration: 3000,
-      });
-      
-      // Reload data
-      loadDashboardData();
-    } catch (error) {
-      console.error('Error deleting user:', error);
-      toast({
-        title: 'Delete Failed',
-        description: error.message,
-        status: 'error',
-        duration: 5000,
-      });
-    }
-  };
-
-  const handleFixAssignments = async () => {
-    if (!window.confirm('Fix all user image assignments? This will update image paths for users with old format names.')) {
+  const handleCreatePreAssignments = async () => {
+    if (!window.confirm('Create pre-assignments for all 1100 login IDs? This will overwrite any existing assignments.')) {
       return;
     }
     
@@ -262,27 +166,27 @@ const AdminDashboard = () => {
       setLoading(true);
       
       toast({
-        title: 'Fixing Assignments',
-        description: 'This may take a few minutes...',
+        title: 'Creating Pre-assignments',
+        description: 'This will take several minutes...',
         status: 'info',
-        duration: 3000,
+        duration: 5000,
       });
       
-      const result = await fixAllUserAssignments();
+      const result = await createPreAssignments();
       
       toast({
-        title: 'Assignment Fix Complete',
-        description: `Fixed ${result.successful}/${result.total} users`,
-        status: result.failed > 0 ? 'warning' : 'success',
+        title: 'Pre-assignments Created',
+        description: `Successfully created assignments for ${result.totalIds} login IDs`,
+        status: 'success',
         duration: 5000,
       });
       
       // Reload data
       loadDashboardData();
     } catch (error) {
-      console.error('Error fixing assignments:', error);
+      console.error('Error creating pre-assignments:', error);
       toast({
-        title: 'Fix Failed',
+        title: 'Creation Failed',
         description: error.message,
         status: 'error',
         duration: 5000,
@@ -292,62 +196,39 @@ const AdminDashboard = () => {
     }
   };
 
-  const handleResetAssignments = async () => {
-    if (!window.confirm('Reset all image assignment counts? This will reset the tracking of how many times each image has been assigned.')) {
+  const handleResetSystem = async () => {
+    if (!window.confirm('WARNING: This will delete ALL assignments and sessions. This cannot be undone! Type "RESET" to confirm.')) {
+      return;
+    }
+    
+    const confirmation = prompt('Type "RESET" to confirm:');
+    if (confirmation !== 'RESET') {
       return;
     }
     
     try {
-      await resetImageAssignments();
+      setLoading(true);
+      
+      await resetPreAssignedSystem();
       
       toast({
-        title: 'Assignments Reset',
-        description: 'Image assignment counts have been reset',
+        title: 'System Reset',
+        description: 'All assignments and sessions have been cleared',
         status: 'success',
         duration: 3000,
       });
       
       loadDashboardData();
     } catch (error) {
-      console.error('Error resetting assignments:', error);
+      console.error('Error resetting system:', error);
       toast({
         title: 'Reset Failed',
         description: error.message,
         status: 'error',
         duration: 5000,
       });
-    }
-  };
-
-  const handleClearAllData = async () => {
-    if (!window.confirm('WARNING: This will delete ALL user data except admin. This cannot be undone! Type "DELETE" to confirm.')) {
-      return;
-    }
-    
-    const confirmation = prompt('Type "DELETE" to confirm:');
-    if (confirmation !== 'DELETE') {
-      return;
-    }
-    
-    try {
-      await clearAllData();
-      
-      toast({
-        title: 'Data Cleared',
-        description: 'All user data has been removed',
-        status: 'success',
-        duration: 3000,
-      });
-      
-      loadDashboardData();
-    } catch (error) {
-      console.error('Error clearing data:', error);
-      toast({
-        title: 'Clear Failed',
-        description: error.message,
-        status: 'error',
-        duration: 5000,
-      });
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -372,26 +253,37 @@ const AdminDashboard = () => {
     });
   };
 
-  const filteredUsers = users.filter(user => {
+  const filteredSessions = activeSessions.filter(session => {
     const matchesSearch = searchTerm === '' || 
-      user.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (user.displayId && user.displayId.toLowerCase().includes(searchTerm.toLowerCase()));
+      session.loginId.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      session.prolificPid.toLowerCase().includes(searchTerm.toLowerCase());
     
     const matchesFilter = filterType === 'all' ||
-      (filterType === 'test' && user.isTest) ||
-      (filterType === 'prolific' && user.isProlific) ||
-      (filterType === 'completed' && user.isCompleted) ||
-      (filterType === 'active' && user.isActive);
+      (filterType === 'completed' && session.surveyCompleted) ||
+      (filterType === 'active' && !session.surveyCompleted && session.hasConsented) ||
+      (filterType === 'consented' && session.hasConsented) ||
+      (filterType === 'not-consented' && !session.hasConsented);
     
     return matchesSearch && matchesFilter;
   });
 
-  const openUserDetails = (user) => {
-    setSelectedUser(user);
-    onUserModalOpen();
+  const openSessionDetails = (session) => {
+    setSelectedSession(session);
+    onSessionModalOpen();
   };
 
-  if (loading && users.length === 0) {
+  const generateProlificUrl = () => {
+    const baseUrl = window.location.origin;
+    const prolificParams = new URLSearchParams({
+      PROLIFIC_PID: '{{%PROLIFIC_PID%}}',
+      STUDY_ID: '{{%STUDY_ID%}}',
+      SESSION_ID: '{{%SESSION_ID%}}'
+    });
+    
+    return `${baseUrl}/login?${prolificParams.toString()}`;
+  };
+
+  if (loading && !systemStats) {
     return (
       <Flex minH="100vh" align="center" justify="center">
         <VStack spacing={4}>
@@ -413,7 +305,7 @@ const AdminDashboard = () => {
               <VStack align="start" spacing={0}>
                 <Heading size="lg">Admin Dashboard</Heading>
                 <Text fontSize="sm" color="gray.600">
-                  Image Evaluation Study Management
+                  Pre-assigned Login ID System
                 </Text>
               </VStack>
             </HStack>
@@ -422,16 +314,16 @@ const AdminDashboard = () => {
               <Button
                 colorScheme="blue"
                 variant="outline"
-                onClick={() => navigate('/setup')}
+                onClick={onSetupModalOpen}
               >
                 🔧 System Setup
               </Button>
               <Button
                 colorScheme="green"
                 variant="outline"
-                onClick={onProlificModalOpen}
+                onClick={() => copyToClipboard(generateProlificUrl())}
               >
-                🔗 Prolific URL
+                🔗 Copy Prolific URL
               </Button>
               <Button
                 colorScheme="red"
@@ -454,19 +346,14 @@ const AdminDashboard = () => {
           </Alert>
         )}
 
-        {/* Statistics Overview */}
-        <SimpleGrid columns={{ base: 1, md: 2, lg: 4 }} spacing={6} mb={8}>
+        {/* System Statistics */}
+        <SimpleGrid columns={{ base: 1, md: 2, lg: 5 }} spacing={6} mb={8}>
           <Card>
             <CardBody>
               <Stat>
-                <StatLabel>Total Participants</StatLabel>
-                <StatNumber>{stats.totalUsers}</StatNumber>
-                <StatHelpText>
-                  <HStack spacing={1}>
-                    <Badge colorScheme="blue" size="sm">{stats.prolificUsers} Prolific</Badge>
-                    <Badge colorScheme="orange" size="sm">{stats.testUsers} Test</Badge>
-                  </HStack>
-                </StatHelpText>
+                <StatLabel>Total Login IDs</StatLabel>
+                <StatNumber>{systemStats?.totalLoginIds || 0}</StatNumber>
+                <StatHelpText>Available slots (0001-1100)</StatHelpText>
               </Stat>
             </CardBody>
           </Card>
@@ -474,11 +361,9 @@ const AdminDashboard = () => {
           <Card>
             <CardBody>
               <Stat>
-                <StatLabel>Completed Studies</StatLabel>
-                <StatNumber>{stats.completedSurveys}</StatNumber>
-                <StatHelpText>
-                  {stats.totalUsers > 0 ? Math.round((stats.completedSurveys / stats.totalUsers) * 100) : 0}% completion rate
-                </StatHelpText>
+                <StatLabel>Available IDs</StatLabel>
+                <StatNumber>{systemStats?.availableIds || 0}</StatNumber>
+                <StatHelpText>Ready for assignment</StatHelpText>
               </Stat>
             </CardBody>
           </Card>
@@ -486,9 +371,9 @@ const AdminDashboard = () => {
           <Card>
             <CardBody>
               <Stat>
-                <StatLabel>Image Evaluations</StatLabel>
-                <StatNumber>{stats.averageCompletion}%</StatNumber>
-                <StatHelpText>Average completion rate</StatHelpText>
+                <StatLabel>Assigned IDs</StatLabel>
+                <StatNumber>{systemStats?.assignedIds || 0}</StatNumber>
+                <StatHelpText>Taken by participants</StatHelpText>
               </Stat>
             </CardBody>
           </Card>
@@ -496,13 +381,59 @@ const AdminDashboard = () => {
           <Card>
             <CardBody>
               <Stat>
-                <StatLabel>Active Users</StatLabel>
-                <StatNumber>{stats.activeUsers}</StatNumber>
+                <StatLabel>Active Sessions</StatLabel>
+                <StatNumber>{systemStats?.activeSessions || 0}</StatNumber>
                 <StatHelpText>Currently participating</StatHelpText>
               </Stat>
             </CardBody>
           </Card>
+
+          <Card>
+            <CardBody>
+              <Stat>
+                <StatLabel>Completed</StatLabel>
+                <StatNumber>{systemStats?.completedSessions || 0}</StatNumber>
+                <StatHelpText>{systemStats?.conversionRate || 0}% completion rate</StatHelpText>
+              </Stat>
+            </CardBody>
+          </Card>
         </SimpleGrid>
+
+        {/* System Status */}
+        <Card mb={6}>
+          <CardHeader>
+            <Heading size="md">System Status</Heading>
+          </CardHeader>
+          <CardBody>
+            <HStack spacing={6} wrap="wrap">
+              <VStack align="start">
+                <Text fontSize="sm" fontWeight="bold">Login ID Pool</Text>
+                <Progress 
+                  value={systemStats ? (systemStats.assignedIds / systemStats.totalLoginIds) * 100 : 0}
+                  size="lg" 
+                  colorScheme="blue" 
+                  w="200px"
+                />
+                <Text fontSize="xs" color="gray.600">
+                  {systemStats?.assignedIds || 0} / {systemStats?.totalLoginIds || 0} assigned
+                </Text>
+              </VStack>
+              
+              <VStack align="start">
+                <Text fontSize="sm" fontWeight="bold">Completion Rate</Text>
+                <Progress 
+                  value={systemStats?.conversionRate || 0}
+                  size="lg" 
+                  colorScheme="green" 
+                  w="200px"
+                />
+                <Text fontSize="xs" color="gray.600">
+                  {systemStats?.conversionRate || 0}% of assigned participants completed
+                </Text>
+              </VStack>
+            </HStack>
+          </CardBody>
+        </Card>
 
         {/* Management Actions */}
         <Card mb={6}>
@@ -520,11 +451,11 @@ const AdminDashboard = () => {
               </Button>
               
               <Button
-                colorScheme="orange"
-                variant="outline"
-                onClick={handleFixAssignments}
+                colorScheme="green"
+                onClick={handleCreatePreAssignments}
+                isDisabled={systemStats?.totalLoginIds > 0}
               >
-                🔧 Fix User Assignments
+                🎯 Create Pre-assignments
               </Button>
               
               <Button
@@ -532,40 +463,44 @@ const AdminDashboard = () => {
                 variant="outline"
                 onClick={onStatsModalOpen}
               >
-                📊 Image Statistics
-              </Button>
-              
-              <Button
-                colorScheme="yellow"
-                variant="outline"
-                onClick={handleResetAssignments}
-              >
-                🔄 Reset Assignment Counts
+                📊 Detailed Statistics
               </Button>
               
               <Button
                 colorScheme="red"
                 variant="outline"
-                onClick={handleClearAllData}
+                onClick={handleResetSystem}
               >
-                🗑️ Clear All Data
+                🗑️ Reset System
               </Button>
             </HStack>
+            
+            {systemStats?.totalLoginIds === 0 && (
+              <Alert status="warning" mt={4}>
+                <AlertIcon />
+                <Box>
+                  <AlertTitle>System Not Initialized</AlertTitle>
+                  <AlertDescription>
+                    Click "Create Pre-assignments" to set up the login ID system with 1100 pre-assigned IDs.
+                  </AlertDescription>
+                </Box>
+              </Alert>
+            )}
           </CardBody>
         </Card>
 
-        {/* User Management */}
+        {/* Active Sessions */}
         <Card>
           <CardHeader>
             <HStack justify="space-between">
-              <Heading size="md">Participant Management</Heading>
+              <Heading size="md">Active Sessions</Heading>
               <HStack spacing={3}>
                 <InputGroup maxW="300px">
                   <InputLeftElement>
                     <Text>🔍</Text>
                   </InputLeftElement>
                   <Input
-                    placeholder="Search users..."
+                    placeholder="Search sessions..."
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
                   />
@@ -576,11 +511,11 @@ const AdminDashboard = () => {
                   onChange={(e) => setFilterType(e.target.value)}
                   maxW="150px"
                 >
-                  <option value="all">All Users</option>
-                  <option value="prolific">Prolific</option>
-                  <option value="test">Test</option>
+                  <option value="all">All Sessions</option>
                   <option value="completed">Completed</option>
                   <option value="active">Active</option>
+                  <option value="consented">Consented</option>
+                  <option value="not-consented">Not Consented</option>
                 </Select>
               </HStack>
             </HStack>
@@ -590,8 +525,8 @@ const AdminDashboard = () => {
               <Table variant="simple" size="sm">
                 <Thead>
                   <Tr>
-                    <Th>User ID</Th>
-                    <Th>Type</Th>
+                    <Th>Login ID</Th>
+                    <Th>Prolific PID</Th>
                     <Th>Progress</Th>
                     <Th>Status</Th>
                     <Th>Created</Th>
@@ -599,75 +534,57 @@ const AdminDashboard = () => {
                   </Tr>
                 </Thead>
                 <Tbody>
-                  {filteredUsers.map(user => (
-                    <Tr key={user.id}>
+                  {filteredSessions.map(session => (
+                    <Tr key={session.loginId}>
                       <Td>
-                        <VStack align="start" spacing={0}>
-                          <Text fontSize="sm" fontFamily="mono">
-                            {user.id.length > 20 ? `${user.id.substring(0, 20)}...` : user.id}
-                          </Text>
-                          {user.displayId && user.displayId !== user.id && (
-                            <Text fontSize="xs" color="gray.500" fontFamily="mono">
-                              {user.displayId}
-                            </Text>
-                          )}
-                        </VStack>
+                        <Text fontFamily="mono" fontWeight="bold" color="blue.600">
+                          {session.loginId}
+                        </Text>
                       </Td>
                       <Td>
-                        <HStack spacing={1}>
-                          {user.isTest && <Badge colorScheme="orange" size="sm">Test</Badge>}
-                          {user.isProlific && <Badge colorScheme="blue" size="sm">Prolific</Badge>}
-                          {!user.isTest && !user.isProlific && <Badge colorScheme="gray" size="sm">Direct</Badge>}
-                        </HStack>
+                        <Text fontSize="xs" fontFamily="mono">
+                          {session.prolificPid.length > 16 
+                            ? `${session.prolificPid.substring(0, 16)}...` 
+                            : session.prolificPid
+                          }
+                        </Text>
                       </Td>
                       <Td>
                         <VStack align="start" spacing={1}>
                           <Text fontSize="sm">
-                            {user.completedImages}/{user.totalImages} images
+                            {session.completedImages}/{session.totalImages} images
                           </Text>
                           <Progress
-                            value={user.completionPercentage}
+                            value={session.totalImages > 0 ? (session.completedImages / session.totalImages) * 100 : 0}
                             size="sm"
-                            colorScheme={user.completionPercentage === 100 ? "green" : "blue"}
+                            colorScheme={session.surveyCompleted ? "green" : "blue"}
                             w="100px"
                           />
                         </VStack>
                       </Td>
                       <Td>
                         <VStack align="start" spacing={0}>
-                          {user.isCompleted ? (
-                            <Badge colorScheme="green">
-                              ✅ Completed
-                            </Badge>
+                          {session.surveyCompleted ? (
+                            <Badge colorScheme="green">✅ Completed</Badge>
+                          ) : session.hasConsented ? (
+                            <Badge colorScheme="blue">🔄 Active</Badge>
                           ) : (
-                            <Badge colorScheme={user.isActive ? "blue" : "gray"}>
-                              {user.isActive ? "🔄 Active" : "⏸️ Inactive"}
-                            </Badge>
+                            <Badge colorScheme="orange">⏳ Not Consented</Badge>
                           )}
                         </VStack>
                       </Td>
                       <Td>
                         <Text fontSize="xs" color="gray.600">
-                          {user.createdAt?.toDate?.()?.toLocaleDateString() || 'Unknown'}
+                          {session.createdAt?.toDate?.()?.toLocaleDateString() || 'Unknown'}
                         </Text>
                       </Td>
                       <Td>
-                        <HStack spacing={1}>
-                          <Button
-                            size="xs"
-                            onClick={() => openUserDetails(user)}
-                          >
-                            👁️ View
-                          </Button>
-                          <Button
-                            size="xs"
-                            colorScheme="red"
-                            variant="outline"
-                            onClick={() => handleDeleteUser(user.id)}
-                          >
-                            🗑️ Delete
-                          </Button>
-                        </HStack>
+                        <Button
+                          size="xs"
+                          onClick={() => openSessionDetails(session)}
+                        >
+                          👁️ View
+                        </Button>
                       </Td>
                     </Tr>
                   ))}
@@ -675,176 +592,204 @@ const AdminDashboard = () => {
               </Table>
             </TableContainer>
             
-            {filteredUsers.length === 0 && (
+            {filteredSessions.length === 0 && (
               <Text textAlign="center" py={8} color="gray.500">
-                No users found matching your criteria
+                No sessions found matching your criteria
               </Text>
             )}
           </CardBody>
         </Card>
       </Container>
 
-      {/* User Details Modal */}
-      <Modal isOpen={isUserModalOpen} onClose={onUserModalClose} size="xl">
+      {/* Session Details Modal */}
+      <Modal isOpen={isSessionModalOpen} onClose={onSessionModalClose} size="xl">
         <ModalOverlay />
         <ModalContent>
-          <ModalHeader>User Details</ModalHeader>
+          <ModalHeader>Session Details</ModalHeader>
           <ModalCloseButton />
           <ModalBody pb={6}>
-            {selectedUser && (
+            {selectedSession && (
               <VStack spacing={4} align="start">
                 <SimpleGrid columns={2} spacing={4} w="full">
                   <Box>
-                    <Text fontWeight="bold" mb={1}>Internal ID:</Text>
-                    <Code fontSize="xs">{selectedUser.id}</Code>
+                    <Text fontWeight="bold" mb={1}>Login ID:</Text>
+                    <Code fontSize="lg" colorScheme="blue">{selectedSession.loginId}</Code>
                   </Box>
                   <Box>
-                    <Text fontWeight="bold" mb={1}>Display ID:</Text>
-                    <Code fontSize="xs">{selectedUser.displayId || 'N/A'}</Code>
+                    <Text fontWeight="bold" mb={1}>Prolific PID:</Text>
+                    <Code fontSize="xs">{selectedSession.prolificPid}</Code>
                   </Box>
                   <Box>
                     <Text fontWeight="bold" mb={1}>Progress:</Text>
-                    <Text>{selectedUser.completedImages}/{selectedUser.totalImages} images ({selectedUser.completionPercentage}%)</Text>
+                    <Text>{selectedSession.completedImages}/{selectedSession.totalImages} images completed</Text>
                   </Box>
                   <Box>
                     <Text fontWeight="bold" mb={1}>Status:</Text>
-                    <Badge colorScheme={selectedUser.isCompleted ? "green" : "blue"}>
-                      {selectedUser.isCompleted ? "Completed" : "In Progress"}
+                    <Badge colorScheme={selectedSession.surveyCompleted ? "green" : "blue"}>
+                      {selectedSession.surveyCompleted ? "Completed" : "In Progress"}
                     </Badge>
                   </Box>
                 </SimpleGrid>
                 
-                {selectedUser.prolificData && (
-                  <Box w="full">
-                    <Text fontWeight="bold" mb={2}>Prolific Data:</Text>
-                    <Box bg="gray.50" p={3} borderRadius="md">
-                      <VStack align="start" spacing={1}>
-                        <Text fontSize="sm">PID: <Code fontSize="xs">{selectedUser.prolificData.prolificPid}</Code></Text>
-                        <Text fontSize="sm">Study ID: <Code fontSize="xs">{selectedUser.prolificData.studyId}</Code></Text>
-                        <Text fontSize="sm">Session ID: <Code fontSize="xs">{selectedUser.prolificData.sessionId}</Code></Text>
-                      </VStack>
-                    </Box>
-                  </Box>
-                )}
-                
-                {selectedUser.assignedImages && (
-                  <Box w="full">
-                    <Text fontWeight="bold" mb={2}>Assigned Images:</Text>
-                    <Box maxH="200px" overflowY="auto">
-                      <UnorderedList spacing={1}>
-                        {selectedUser.assignedImages.map((img, idx) => (
-                          <ListItem key={idx} fontSize="sm">
-                            <Code fontSize="xs">{img.id || img.name}</Code> - {img.set}
-                            {selectedUser.completedImageIds?.includes(img.id || img.name) && (
-                              <Badge ml={2} colorScheme="green" size="sm">Completed</Badge>
-                            )}
-                          </ListItem>
-                        ))}
-                      </UnorderedList>
-                    </Box>
-                  </Box>
-                )}
+                <Box w="full">
+                  <Text fontWeight="bold" mb={2}>Session Timeline:</Text>
+                  <VStack align="start" spacing={2}>
+                    <HStack>
+                      <Badge>Created:</Badge>
+                      <Text fontSize="sm">{selectedSession.createdAt?.toDate?.()?.toLocaleString() || 'Unknown'}</Text>
+                    </HStack>
+                    <HStack>
+                      <Badge>Last Login:</Badge>
+                      <Text fontSize="sm">{selectedSession.lastLogin?.toDate?.()?.toLocaleString() || 'Unknown'}</Text>
+                    </HStack>
+                    <HStack>
+                      <Badge>Consented:</Badge>
+                      <Text fontSize="sm">{selectedSession.hasConsented ? '✅ Yes' : '❌ No'}</Text>
+                    </HStack>
+                  </VStack>
+                </Box>
               </VStack>
             )}
           </ModalBody>
           <ModalFooter>
-            <Button onClick={onUserModalClose}>Close</Button>
+            <Button onClick={onSessionModalClose}>Close</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
 
-      {/* Image Statistics Modal */}
+      {/* System Setup Modal */}
+      <Modal isOpen={isSetupModalOpen} onClose={onSetupModalClose} size="lg">
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>System Setup & Information</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody pb={6}>
+            <VStack spacing={6}>
+              <Alert status="info">
+                <AlertIcon />
+                <Box>
+                  <AlertTitle>Pre-assigned Login ID System</AlertTitle>
+                  <AlertDescription>
+                    This system uses 1100 pre-assigned login IDs (0001-1100), each with 10 pre-assigned images.
+                  </AlertDescription>
+                </Box>
+              </Alert>
+              
+              <Box w="full">
+                <Text fontWeight="bold" mb={3}>System Features:</Text>
+                <UnorderedList spacing={2}>
+                  <ListItem>1100 unique login IDs (0001 to 1100)</ListItem>
+                  <ListItem>Each ID has 10 pre-assigned images (5 from set1, 5 from set2)</ListItem>
+                  <ListItem>Automatic assignment to Prolific participants</ListItem>
+                  <ListItem>No image collision or assignment conflicts</ListItem>
+                  <ListItem>Clear tracking of ID usage and completion</ListItem>
+                </UnorderedList>
+              </Box>
+              
+              <Box w="full">
+                <Text fontWeight="bold" mb={2}>Prolific Integration:</Text>
+                <Code p={2} display="block" fontSize="xs" bg="gray.100">
+                  {generateProlificUrl()}
+                </Code>
+                <Button 
+                  size="sm" 
+                  mt={2} 
+                  onClick={() => copyToClipboard(generateProlificUrl())}
+                >
+                  Copy Prolific URL
+                </Button>
+              </Box>
+              
+              {availableIds.length > 0 && (
+                <Box w="full">
+                  <Text fontWeight="bold" mb={2}>Sample Available IDs:</Text>
+                  <HStack wrap="wrap" spacing={2}>
+                    {availableIds.slice(0, 10).map(id => (
+                      <Badge key={id.loginId} colorScheme="green">{id.loginId}</Badge>
+                    ))}
+                    {availableIds.length > 10 && (
+                      <Text fontSize="sm" color="gray.600">...and {availableIds.length - 10} more</Text>
+                    )}
+                  </HStack>
+                </Box>
+              )}
+            </VStack>
+          </ModalBody>
+          <ModalFooter>
+            <Button onClick={onSetupModalClose}>Close</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Statistics Modal */}
       <Modal isOpen={isStatsModalOpen} onClose={onStatsModalClose} size="lg">
         <ModalOverlay />
         <ModalContent>
-          <ModalHeader>Image Assignment Statistics</ModalHeader>
+          <ModalHeader>Detailed Statistics</ModalHeader>
           <ModalCloseButton />
           <ModalBody pb={6}>
-            {imageStats ? (
-              <VStack spacing={6}>
-                <SimpleGrid columns={2} spacing={6} w="full">
-                  <Card>
-                    <CardHeader>
-                      <Heading size="sm">Set 1 (Images 1-1200)</Heading>
-                    </CardHeader>
-                    <CardBody>
-                      <VStack spacing={2} align="start">
-                        {Object.entries(imageStats.set1 || {}).map(([assignments, count]) => (
-                          <HStack key={assignments} justify="space-between" w="full">
-                            <Text fontSize="sm">{assignments} assignments:</Text>
-                            <Badge>{count} images</Badge>
-                          </HStack>
-                        ))}
-                      </VStack>
-                    </CardBody>
-                  </Card>
-                  
-                  <Card>
-                    <CardHeader>
-                      <Heading size="sm">Set 2 (Images 1201-2400)</Heading>
-                    </CardHeader>
-                    <CardBody>
-                      <VStack spacing={2} align="start">
-                        {Object.entries(imageStats.set2 || {}).map(([assignments, count]) => (
-                          <HStack key={assignments} justify="space-between" w="full">
-                            <Text fontSize="sm">{assignments} assignments:</Text>
-                            <Badge>{count} images</Badge>
-                          </HStack>
-                        ))}
-                      </VStack>
-                    </CardBody>
-                  </Card>
-                </SimpleGrid>
-              </VStack>
-            ) : (
-              <Text>Loading statistics...</Text>
+            {systemStats && (
+              <SimpleGrid columns={2} spacing={6}>
+                <Card>
+                  <CardHeader>
+                    <Heading size="sm">Login ID Usage</Heading>
+                  </CardHeader>
+                  <CardBody>
+                    <VStack spacing={2} align="start">
+                      <HStack justify="space-between" w="full">
+                        <Text fontSize="sm">Total IDs:</Text>
+                        <Badge>{systemStats.totalLoginIds}</Badge>
+                      </HStack>
+                      <HStack justify="space-between" w="full">
+                        <Text fontSize="sm">Available:</Text>
+                        <Badge colorScheme="green">{systemStats.availableIds}</Badge>
+                      </HStack>
+                      <HStack justify="space-between" w="full">
+                        <Text fontSize="sm">Assigned:</Text>
+                        <Badge colorScheme="blue">{systemStats.assignedIds}</Badge>
+                      </HStack>
+                      <HStack justify="space-between" w="full">
+                        <Text fontSize="sm">Usage Rate:</Text>
+                        <Badge colorScheme="purple">
+                          {systemStats.totalLoginIds > 0 
+                            ? Math.round((systemStats.assignedIds / systemStats.totalLoginIds) * 100)
+                            : 0}%
+                        </Badge>
+                      </HStack>
+                    </VStack>
+                  </CardBody>
+                </Card>
+                
+                <Card>
+                  <CardHeader>
+                    <Heading size="sm">Participant Activity</Heading>
+                  </CardHeader>
+                  <CardBody>
+                    <VStack spacing={2} align="start">
+                      <HStack justify="space-between" w="full">
+                        <Text fontSize="sm">Active Sessions:</Text>
+                        <Badge colorScheme="blue">{systemStats.activeSessions}</Badge>
+                      </HStack>
+                      <HStack justify="space-between" w="full">
+                        <Text fontSize="sm">Completed:</Text>
+                        <Badge colorScheme="green">{systemStats.completedSessions}</Badge>
+                      </HStack>
+                      <HStack justify="space-between" w="full">
+                        <Text fontSize="sm">Completion Rate:</Text>
+                        <Badge colorScheme="orange">{systemStats.conversionRate}%</Badge>
+                      </HStack>
+                      <HStack justify="space-between" w="full">
+                        <Text fontSize="sm">Remaining Slots:</Text>
+                        <Badge colorScheme="gray">{systemStats.availableIds}</Badge>
+                      </HStack>
+                    </VStack>
+                  </CardBody>
+                </Card>
+              </SimpleGrid>
             )}
           </ModalBody>
           <ModalFooter>
             <Button onClick={onStatsModalClose}>Close</Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
-
-      {/* Prolific URL Modal */}
-      <Modal isOpen={isProlificModalOpen} onClose={onProlificModalClose} size="lg">
-        <ModalOverlay />
-        <ModalContent>
-          <ModalHeader>Prolific Study URL</ModalHeader>
-          <ModalCloseButton />
-          <ModalBody pb={6}>
-            <VStack spacing={4}>
-              <Text fontSize="sm" color="gray.600">
-                Use this URL as your study link in Prolific. The placeholders will be automatically replaced with participant data.
-              </Text>
-              
-              <Box w="full">
-                <HStack mb={2}>
-                  <Text fontWeight="bold">Study URL:</Text>
-                  <Button size="xs" onClick={() => copyToClipboard(prolificUrl)}>
-                    📋 Copy
-                  </Button>
-                </HStack>
-                <Textarea
-                  value={prolificUrl}
-                  isReadOnly
-                  fontFamily="mono"
-                  fontSize="sm"
-                  rows={4}
-                />
-              </Box>
-              
-              <Alert status="info" size="sm">
-                <AlertIcon />
-                <Text fontSize="sm">
-                  Make sure to set the completion URL in Prolific to redirect participants 
-                  back after they finish the study.
-                </Text>
-              </Alert>
-            </VStack>
-          </ModalBody>
-          <ModalFooter>
-            <Button onClick={onProlificModalClose}>Close</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>

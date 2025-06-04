@@ -1,4 +1,4 @@
-// src/pages/ConsentPage.js
+// src/pages/ConsentPage.js - FIXED VERSION
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
@@ -44,7 +44,8 @@ const ConsentPage = () => {
     // Check if user has already consented
     const checkConsent = async () => {
       try {
-        const userRef = doc(db, 'loginIDs', loginId);
+        // FIXED: Use 'participants' collection instead of 'loginIDs'
+        const userRef = doc(db, 'participants', loginId);
         const userDoc = await getDoc(userRef);
         
         if (!userDoc.exists()) {
@@ -83,12 +84,13 @@ const ConsentPage = () => {
     try {
       setLoading(true);
       
-      // Update user record to indicate consent
-      const userRef = doc(db, 'loginIDs', loginId);
+      // FIXED: Update user record in 'participants' collection
+      const userRef = doc(db, 'participants', loginId);
       await updateDoc(userRef, {
         hasConsented: true,
         consentedAt: serverTimestamp(),
-        lastUpdated: serverTimestamp()
+        lastActiveAt: serverTimestamp(),
+        studyPhase: 'survey' // Update phase to survey
       });
       
       toast({

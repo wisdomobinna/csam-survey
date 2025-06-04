@@ -1,191 +1,230 @@
-// src/utils/firebaseSetup.js - Fixed image assignment for set1/set2 structure
-import { collection, doc, getDoc, setDoc, updateDoc, arrayUnion, runTransaction, getDocs, deleteDoc } from 'firebase/firestore';
+// src/utils/firebaseSetup.js - Updated for pre-assigned login system
+import { collection, doc, getDoc, setDoc, updateDoc, getDocs, deleteDoc, query, where } from 'firebase/firestore';
 import { ref, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../firebase/config';
 
-// Track image assignment counts (max 5 per image)
-const MAX_ASSIGNMENTS_PER_IMAGE = 5;
-
-// Get available images from a set that haven't reached max assignments
-const getAvailableImagesFromSet = async (setName, count) => {
+/**
+ * Get next available login ID and assign to participant
+ */
+export const assignLoginIdToParticipant = async (prolificPid, prolificData = {}) => {
   try {
-    console.log(`Getting ${count} available images from ${setName}`);
+    console.log('Assigning login ID to participant:', prolificPid);
     
-    const availableImages = [];
-    const setStart = setName === 'set1' ? 1 : 1201;
-    const setEnd = setName === 'set1' ? 1200 : 2400;
-    
-    // Get current assignment counts
-    const assignmentRef = doc(db, 'imageAssignments', setName);
-    const assignmentDoc = await getDoc(assignmentRef);
-    const assignments = assignmentDoc.exists() ? assignmentDoc.data() : {};
-    
-    // Create list of available images (those with < 5 assignments)
-    const imagePool = [];
-    for (let i = setStart; i <= setEnd; i++) {
-      const imageName = `${i}.png`;
-      const assignmentCount = assignments[imageName] || 0;
-      
-      if (assignmentCount < MAX_ASSIGNMENTS_PER_IMAGE) {
-        imagePool.push({
-          name: imageName,
-          set: setName,
-          path: `${setName}/${imageName}`,
-          assignmentCount
-        });
-      }
+    // Check if participant already has a login ID
+    const existingAssignment = await findExistingParticipant(prolificPid);
+    if (existingAssignment.exists) {
+      console.log('Participant already has login ID:', existingAssignment.loginId);
+      return {
+        success: true,
+        loginId: existingAssignment.loginId,
+        isExisting: true
+      };
     }
     
-    console.log(`Found ${imagePool.length} available images in ${setName}`);
+    // Get next available login ID
+    const preAssignedRef = collection(db, 'preAssignedLogins');
+    const availableQuery = query(preAssignedRef, where('isAssigned', '==', false));
+    const availableSnapshot = await getDocs(availableQuery);
     
-    if (imagePool.length < count) {
-      console.warn(`Only ${imagePool.length} available images in ${setName}, but ${count} requested`);
+    if (availableSnapshot.empty) {
+      throw new Error('No available login IDs remaining. Study may be full.');
     }
     
-    // Randomly select images, prioritizing those with fewer assignments
-    const shuffled = imagePool.sort((a, b) => {
-      // First sort by assignment count (ascending), then randomly
-      if (a.assignmentCount !== b.assignmentCount) {
-        return a.assignmentCount - b.assignmentCount;
+    // Get the first available login ID (they're ordered 0001, 0002, etc.)
+    const availableDocs = availableSnapshot.docs.sort((a, b) => a.id.localeCompare(b.id));
+    const selectedDoc = availableDocs[0];
+    const loginId = selectedDoc.id;
+    const loginData = selectedDoc.data();
+    
+    console.log(`Assigning login ID ${loginId} to ${prolificPid}`);
+    
+    // Update the pre-assigned login document
+    await updateDoc(doc(db, 'preAssignedLogins', loginId), {
+      isAssigned: true,
+      assignedTo: prolificPid,
+      assignedAt: new Date(),
+      status: 'assigned',
+      prolificData: {
+        prolificPid,
+        studyId: prolificData.studyId || null,
+        sessionId: prolificData.sessionId || null,
+        detectedAt: prolificData.detectedAt || new Date().toISOString(),
+        ...prolificData
       }
-      return Math.random() - 0.5;
     });
     
-    return shuffled.slice(0, count);
-  } catch (error) {
-    console.error(`Error getting available images from ${setName}:`, error);
-    throw error;
-  }
-};
-
-// Update assignment counts for selected images
-const updateImageAssignments = async (selectedImages, userId) => {
-  try {
-    // Group images by set
-    const imagesBySet = {
-      set1: selectedImages.filter(img => img.set === 'set1'),
-      set2: selectedImages.filter(img => img.set === 'set2')
+    // Create active participant session
+    await setDoc(doc(db, 'participants', loginId), {
+      loginId: loginId,
+      prolificPid: prolificPid,
+      assignedImages: loginData.assignedImages,
+      totalImages: loginData.totalImages,
+      
+      // Progress tracking
+      studyPhase: 'consent',
+      hasConsented: false,
+      consentedAt: null,
+      currentImageIndex: 0,
+      completedImageCount: 0,
+      completedImageIds: [],
+      surveyCompleted: false,
+      completedAt: null,
+      
+      // Session metadata
+      createdAt: new Date(),
+      firstLoginAt: new Date(),
+      lastActiveAt: new Date(),
+      totalSessionTime: 0,
+      
+      // Prolific integration
+      prolificData: {
+        studyId: prolificData.studyId || null,
+        sessionId: prolificData.sessionId || null,
+        prolificPid: prolificPid,
+        ...prolificData
+      },
+      
+      // Technical metadata
+      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+      timezone: typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : ''
+    });
+    
+    console.log(`Successfully assigned login ID ${loginId} to participant ${prolificPid}`);
+    
+    return {
+      success: true,
+      loginId: loginId,
+      assignedImages: loginData.assignedImages,
+      isExisting: false
     };
     
-    // Update assignment counts for each set
-    for (const [setName, images] of Object.entries(imagesBySet)) {
-      if (images.length === 0) continue;
-      
-      const assignmentRef = doc(db, 'imageAssignments', setName);
-      
-      await runTransaction(db, async (transaction) => {
-        const assignmentDoc = await transaction.get(assignmentRef);
-        const currentAssignments = assignmentDoc.exists() ? assignmentDoc.data() : {};
-        
-        // Update counts and track user assignments
-        const updates = { ...currentAssignments };
-        
-        images.forEach(image => {
-          const imageName = image.name;
-          updates[imageName] = (updates[imageName] || 0) + 1;
-          
-          // Track which users were assigned this image
-          const userListKey = `${imageName}_users`;
-          if (!updates[userListKey]) {
-            updates[userListKey] = [];
-          }
-          updates[userListKey] = [...(updates[userListKey] || []), userId];
-        });
-        
-        transaction.set(assignmentRef, updates);
-      });
-      
-      console.log(`Updated assignments for ${images.length} images in ${setName}`);
-    }
   } catch (error) {
-    console.error('Error updating image assignments:', error);
+    console.error('Error assigning login ID to participant:', error);
     throw error;
   }
 };
 
-// Main function to assign images to a user
-export const assignImagesToUser = async (userId) => {
+/**
+ * Find existing participant by Prolific PID
+ */
+export const findExistingParticipant = async (prolificPid) => {
   try {
-    console.log(`Assigning images to user: ${userId}`);
+    // Check pre-assigned logins for this Prolific PID
+    const preAssignedRef = collection(db, 'preAssignedLogins');
+    const assignedQuery = query(preAssignedRef, where('assignedTo', '==', prolificPid));
+    const assignedSnapshot = await getDocs(assignedQuery);
     
-    // Get 5 images from each set
-    const [set1Images, set2Images] = await Promise.all([
-      getAvailableImagesFromSet('set1', 5),
-      getAvailableImagesFromSet('set2', 5)
-    ]);
-    
-    const allSelectedImages = [...set1Images, ...set2Images];
-    
-    if (allSelectedImages.length < 10) {
-      console.warn(`Only ${allSelectedImages.length} images available, expected 10`);
+    if (!assignedSnapshot.empty) {
+      const doc = assignedSnapshot.docs[0];
+      return {
+        exists: true,
+        loginId: doc.id,
+        assignmentData: doc.data()
+      };
     }
     
-    // Update assignment tracking
-    await updateImageAssignments(allSelectedImages, userId);
+    return { exists: false };
     
-    // Get download URLs for the selected images
-    const imagesWithUrls = await Promise.all(
-      allSelectedImages.map(async (image, index) => {
-        try {
-          const imageRef = ref(storage, image.path);
-          const downloadURL = await getDownloadURL(imageRef);
-          
-          return {
-            id: `${image.set}_${image.name.replace('.png', '')}`, // e.g., "set1_123"
-            name: image.name, // e.g., "123.png"
-            set: image.set,
-            path: image.path, // e.g., "set1/123.png"
-            url: downloadURL,
-            index: index,
-            assignmentCount: image.assignmentCount + 1 // After this assignment
-          };
-        } catch (error) {
-          console.error(`Error getting URL for ${image.path}:`, error);
-          return null;
-        }
-      })
-    );
-    
-    // Filter out any failed URLs
-    const validImages = imagesWithUrls.filter(img => img !== null);
-    
-    console.log(`Successfully assigned ${validImages.length} images to user ${userId}`);
-    console.log('Assigned images:', validImages.map(img => ({ name: img.name, set: img.set, count: img.assignmentCount })));
-    
-    return validImages;
   } catch (error) {
-    console.error('Error in assignImagesToUser:', error);
+    console.error('Error finding existing participant:', error);
     throw error;
   }
 };
 
-// Get assignment statistics
+/**
+ * Get system statistics for admin dashboard
+ */
+export const getSystemStats = async () => {
+  try {
+    // Get system config
+    const systemConfigRef = doc(db, 'systemConfig', 'main');
+    const systemConfigDoc = await getDoc(systemConfigRef);
+    
+    if (!systemConfigDoc.exists()) {
+      return {
+        totalLoginIds: 0,
+        availableIds: 0,
+        assignedIds: 0,
+        activeParticipants: 0,
+        completedParticipants: 0,
+        conversionRate: 0
+      };
+    }
+    
+    const systemConfig = systemConfigDoc.data();
+    
+    // Get pre-assigned login stats
+    const preAssignedSnapshot = await getDocs(collection(db, 'preAssignedLogins'));
+    let availableCount = 0;
+    let assignedCount = 0;
+    
+    preAssignedSnapshot.docs.forEach(doc => {
+      const data = doc.data();
+      if (data.isAssigned) {
+        assignedCount++;
+      } else {
+        availableCount++;
+      }
+    });
+    
+    // Get active participant stats
+    const participantsSnapshot = await getDocs(collection(db, 'participants'));
+    let activeCount = 0;
+    let completedCount = 0;
+    
+    participantsSnapshot.docs.forEach(doc => {
+      const data = doc.data();
+      if (data.surveyCompleted) {
+        completedCount++;
+      } else {
+        activeCount++;
+      }
+    });
+    
+    const conversionRate = assignedCount > 0 ? Math.round((completedCount / assignedCount) * 100) : 0;
+    
+    const stats = {
+      totalLoginIds: preAssignedSnapshot.size,
+      availableIds: availableCount,
+      assignedIds: assignedCount,
+      activeParticipants: activeCount,
+      completedParticipants: completedCount,
+      conversionRate: conversionRate
+    };
+    
+    // Update cached stats in system config
+    await updateDoc(systemConfigRef, {
+      'stats.availableLoginIds': availableCount,
+      'stats.assignedLoginIds': assignedCount,
+      'stats.activeParticipants': activeCount,
+      'stats.completedParticipants': completedCount,
+      'stats.lastUpdated': new Date()
+    });
+    
+    return stats;
+    
+  } catch (error) {
+    console.error('Error getting system stats:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get assignment statistics for images
+ */
 export const getAssignmentStats = async () => {
   try {
     const [set1Doc, set2Doc] = await Promise.all([
-      getDoc(doc(db, 'imageAssignments', 'set1')),
-      getDoc(doc(db, 'imageAssignments', 'set2'))
+      getDoc(doc(db, 'imageMetadata', 'set1')),
+      getDoc(doc(db, 'imageMetadata', 'set2'))
     ]);
     
-    const set1Data = set1Doc.exists() ? set1Doc.data() : {};
-    const set2Data = set2Doc.exists() ? set2Doc.data() : {};
-    
-    // Count assignments for each set
-    const countAssignments = (data) => {
-      const counts = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-      
-      Object.entries(data).forEach(([key, value]) => {
-        if (key.endsWith('.png') && typeof value === 'number') {
-          counts[value] = (counts[value] || 0) + 1;
-        }
-      });
-      
-      return counts;
-    };
+    const set1Data = set1Doc.exists() ? set1Doc.data() : { assignments: {}, setStats: {} };
+    const set2Data = set2Doc.exists() ? set2Doc.data() : { assignments: {}, setStats: {} };
     
     return {
-      set1: countAssignments(set1Data),
-      set2: countAssignments(set2Data),
+      set1: set1Data.setStats || {},
+      set2: set2Data.setStats || {},
       totalImages: {
         set1: 1200,
         set2: 1200
@@ -197,24 +236,48 @@ export const getAssignmentStats = async () => {
   }
 };
 
-// Reset assignments (admin function)
-export const resetImageAssignments = async () => {
+/**
+ * Reset the entire pre-assigned system (admin function)
+ */
+export const resetPreAssignedSystem = async () => {
   try {
-    console.log('Resetting all image assignments...');
+    console.log('Resetting pre-assigned system...');
     
-    await Promise.all([
-      setDoc(doc(db, 'imageAssignments', 'set1'), {}),
-      setDoc(doc(db, 'imageAssignments', 'set2'), {})
-    ]);
+    // Clear pre-assigned logins
+    const preAssignedSnapshot = await getDocs(collection(db, 'preAssignedLogins'));
+    const deletePromises = [];
     
-    console.log('Image assignments reset successfully');
+    preAssignedSnapshot.docs.forEach(doc => {
+      deletePromises.push(deleteDoc(doc.ref));
+    });
+    
+    // Clear active participants
+    const participantsSnapshot = await getDocs(collection(db, 'participants'));
+    participantsSnapshot.docs.forEach(doc => {
+      deletePromises.push(deleteDoc(doc.ref));
+    });
+    
+    // Clear image metadata
+    deletePromises.push(deleteDoc(doc(db, 'imageMetadata', 'set1')));
+    deletePromises.push(deleteDoc(doc(db, 'imageMetadata', 'set2')));
+    
+    // Clear system config
+    deletePromises.push(deleteDoc(doc(db, 'systemConfig', 'main')));
+    
+    await Promise.all(deletePromises);
+    
+    console.log('Pre-assigned system reset complete');
+    return { success: true };
+    
   } catch (error) {
-    console.error('Error resetting assignments:', error);
+    console.error('Error resetting system:', error);
     throw error;
   }
 };
 
-// Verify Firebase setup and storage structure
+/**
+ * Verify Firebase setup and storage structure
+ */
 export const verifySetup = async () => {
   try {
     console.log('Verifying Firebase setup...');
@@ -224,12 +287,14 @@ export const verifySetup = async () => {
     await setDoc(testRef, { timestamp: new Date(), test: true });
     console.log('✓ Firestore connection working');
     
-    // Test Storage access by checking a few sample images
+    // Test Storage access by checking sample images
     const testImages = [
       'set1/1.png',
       'set1/100.png', 
+      'set1/1200.png',
       'set2/1201.png',
-      'set2/1300.png'
+      'set2/1300.png',
+      'set2/2400.png'
     ];
     
     const results = [];
@@ -245,14 +310,29 @@ export const verifySetup = async () => {
       }
     }
     
-    // Check assignment collections
-    const assignmentStats = await getAssignmentStats();
+    // Check system configuration
+    let systemStatus = 'not_initialized';
+    try {
+      const systemConfigDoc = await getDoc(doc(db, 'systemConfig', 'main'));
+      if (systemConfigDoc.exists()) {
+        systemStatus = 'initialized';
+      }
+    } catch (error) {
+      console.warn('Could not check system config:', error);
+    }
+    
+    // Clean up test document
+    try {
+      await deleteDoc(testRef);
+    } catch (error) {
+      // Ignore cleanup errors
+    }
     
     return {
       success: true,
       firestore: 'connected',
       storage: results,
-      assignments: assignmentStats,
+      systemStatus: systemStatus,
       timestamp: new Date().toISOString()
     };
     
@@ -266,26 +346,97 @@ export const verifySetup = async () => {
   }
 };
 
-// Clear all data (admin function - use with caution)
-export const clearAllData = async () => {
+/**
+ * Update participant progress
+ */
+export const updateParticipantProgress = async (loginId, updates) => {
   try {
-    console.log('Clearing all data...');
-    
-    // Clear assignment tracking
-    await resetImageAssignments();
-    
-    // Clear user data (except admin)
-    const usersRef = collection(db, 'loginIDs');
-    const usersSnapshot = await getDocs(usersRef);
-    
-    const deletePromises = [];
-    usersSnapshot.forEach((userDoc) => {
-      if (userDoc.id !== 'ADMIN') {
-        deletePromises.push(deleteDoc(doc(db, 'loginIDs', userDoc.id)));
-      }
+    const participantRef = doc(db, 'participants', loginId);
+    await updateDoc(participantRef, {
+      ...updates,
+      lastActiveAt: new Date()
     });
     
-    await Promise.all(deletePromises);
+    console.log(`Updated progress for participant ${loginId}`);
+    return { success: true };
+    
+  } catch (error) {
+    console.error('Error updating participant progress:', error);
+    throw error;
+  }
+};
+
+/**
+ * Check if participant has completed the survey
+ */
+export const checkSurveyCompletion = async (loginId) => {
+  try {
+    const participantRef = doc(db, 'participants', loginId);
+    const participantDoc = await getDoc(participantRef);
+    
+    if (!participantDoc.exists()) {
+      return false;
+    }
+    
+    const participantData = participantDoc.data();
+    return participantData.surveyCompleted === true;
+    
+  } catch (error) {
+    console.error('Error checking survey completion:', error);
+    return false;
+  }
+};
+
+/**
+ * Get participant data by login ID
+ */
+export const getParticipantData = async (loginId) => {
+  try {
+    const participantRef = doc(db, 'participants', loginId);
+    const participantDoc = await getDoc(participantRef);
+    
+    if (!participantDoc.exists()) {
+      throw new Error(`Participant with login ID ${loginId} not found`);
+    }
+    
+    return participantDoc.data();
+    
+  } catch (error) {
+    console.error('Error getting participant data:', error);
+    throw error;
+  }
+};
+
+/**
+ * Clear all participant data (admin function - use with caution)
+ */
+export const clearAllData = async () => {
+  try {
+    console.log('Clearing all participant data...');
+    
+    // Clear active participants (keep pre-assigned logins for reuse)
+    const participantsSnapshot = await getDocs(collection(db, 'participants'));
+    const deletePromises = [];
+    
+    participantsSnapshot.docs.forEach(doc => {
+      deletePromises.push(deleteDoc(doc.ref));
+    });
+    
+    // Reset assignment status in pre-assigned logins
+    const preAssignedSnapshot = await getDocs(collection(db, 'preAssignedLogins'));
+    const resetPromises = [];
+    
+    preAssignedSnapshot.docs.forEach(doc => {
+      resetPromises.push(updateDoc(doc.ref, {
+        isAssigned: false,
+        assignedTo: null,
+        assignedAt: null,
+        status: 'available',
+        prolificData: null
+      }));
+    });
+    
+    await Promise.all([...deletePromises, ...resetPromises]);
     
     // Clear any test documents
     try {
@@ -294,11 +445,22 @@ export const clearAllData = async () => {
       // Ignore if test doc doesn't exist
     }
     
-    console.log('All data cleared successfully');
-    return { success: true, message: 'All data cleared successfully' };
+    console.log('All participant data cleared successfully');
+    return { success: true, message: 'All participant data cleared successfully' };
     
   } catch (error) {
     console.error('Error clearing data:', error);
     throw error;
   }
+};
+
+// Legacy function compatibility - these now work with the new system
+export const assignImagesToUser = async (userId) => {
+  console.warn('assignImagesToUser is deprecated. Use assignLoginIdToParticipant instead.');
+  throw new Error('This function is no longer supported. Use the pre-assigned login system.');
+};
+
+export const resetImageAssignments = async () => {
+  console.warn('resetImageAssignments is deprecated. Use resetPreAssignedSystem instead.');
+  return await resetPreAssignedSystem();
 };
