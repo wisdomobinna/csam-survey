@@ -1,4 +1,4 @@
-// src/pages/Survey.js - Fixed version without problematic imports
+// src/pages/Survey.js - Complete fixed version
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
@@ -47,49 +47,67 @@ const Survey = () => {
   const loadUserData = useCallback(async () => {
     try {
       setLoading(true);
+      setError(''); // Clear any previous errors
+      
       const userId = sessionStorage.getItem('userLoginId');
       
       if (!userId) {
+        console.error('Survey: No user session found');
         setError('No user session found');
         navigate('/login');
         return;
       }
 
-      console.log('Loading user data for:', userId);
+      console.log('Survey: Loading user data for:', userId);
       
       // Get user document
       const userRef = doc(db, 'loginIDs', userId);
       const userDoc = await getDoc(userRef);
       
       if (!userDoc.exists()) {
+        console.error('Survey: User document not found:', userId);
         setError('User not found');
         navigate('/login');
         return;
       }
       
       const userData = userDoc.data();
-      console.log('User data loaded:', userData);
+      console.log('Survey: User data loaded:', {
+        hasConsented: userData.hasConsented,
+        surveyCompleted: userData.surveyCompleted,
+        assignedImages: userData.assignedImages?.length,
+        completedImages: userData.completedImages
+      });
       
-      // Check if user has consented
+      // Critical check: Verify user has consented
       if (!userData.hasConsented) {
-        console.log('User has not consented, redirecting...');
+        console.log('Survey: User has not consented, redirecting to consent page');
         navigate('/consent');
+        return;
+      }
+      
+      // Check if survey is already completed
+      const isCompleted = await checkSurveyCompletion(userId);
+      if (isCompleted || userData.surveyCompleted) {
+        console.log('Survey: User has completed survey, redirecting to completion page');
+        navigate('/completion');
         return;
       }
       
       // Get assigned images
       const assignedImages = userData.assignedImages || [];
-      console.log('Assigned images:', assignedImages);
+      console.log('Survey: Assigned images:', assignedImages);
       
       if (assignedImages.length === 0) {
-        setError('No images assigned to this user');
+        console.error('Survey: No images assigned to user');
+        setError('No images assigned to this user. Please contact support.');
         return;
       }
       
       // Load image data with proper error handling and path construction
       const imagePromises = assignedImages.map(async (imageData, index) => {
         try {
-          console.log(`Loading image ${index + 1}:`, imageData);
+          console.log(`Survey: Loading image ${index + 1}:`, imageData);
           
           // Check if image already has a valid URL
           if (imageData.url && imageData.path) {
@@ -133,7 +151,7 @@ const Survey = () => {
           
           // Case 4: Old format names like "safe_adults_0019" - need to map these
           else if (imageData.name && imageData.name.includes('_')) {
-            console.warn(`Old format image name detected: ${imageData.name}`);
+            console.warn(`Survey: Old format image name detected: ${imageData.name}`);
             
             // Try to extract number from old format name
             const numberMatch = imageData.name.match(/(\d+)$/);
@@ -146,7 +164,7 @@ const Survey = () => {
               imagePath = `${imageSet}/${imageName}`;
               imageId = `${imageSet}_${imageNumber}`;
               
-              console.log(`Mapped old format ${imageData.name} to ${imagePath}`);
+              console.log(`Survey: Mapped old format ${imageData.name} to ${imagePath}`);
             } else {
               throw new Error(`Cannot map old format image name: ${imageData.name}`);
             }
@@ -174,7 +192,7 @@ const Survey = () => {
             throw new Error(`Could not construct image path from: ${JSON.stringify(imageData)}`);
           }
           
-          console.log(`Constructed path: ${imagePath} for image:`, imageData);
+          console.log(`Survey: Constructed path: ${imagePath} for image:`, imageData);
           
           // Get download URL from Firebase Storage
           const imageRef = ref(storage, imagePath);
@@ -193,8 +211,8 @@ const Survey = () => {
           };
           
         } catch (error) {
-          console.error(`Error loading image ${index + 1}:`, error);
-          console.error('Image data:', imageData);
+          console.error(`Survey: Error loading image ${index + 1}:`, error);
+          console.error('Survey: Image data:', imageData);
           
           return {
             ...imageData,
@@ -205,14 +223,14 @@ const Survey = () => {
       });
       
       const loadedImages = await Promise.all(imagePromises);
-      console.log('All images processed:', loadedImages);
+      console.log('Survey: All images processed:', loadedImages);
       
       // Filter out failed images and log them
       const validImages = loadedImages.filter(img => img.loaded);
       const failedImages = loadedImages.filter(img => !img.loaded);
       
       if (failedImages.length > 0) {
-        console.error('Failed to load images:', failedImages);
+        console.error('Survey: Failed to load images:', failedImages);
         toast({
           title: 'Some Images Failed to Load',
           description: `${failedImages.length} out of ${loadedImages.length} images could not be loaded`,
@@ -241,10 +259,10 @@ const Survey = () => {
       const startIndex = Math.min(completedImagesCount, validImages.length - 1);
       setCurrentImageIndex(startIndex);
       
-      console.log(`Loaded ${validImages.length} images, starting at index ${startIndex}`);
+      console.log(`Survey: Loaded ${validImages.length} images, starting at index ${startIndex}`);
       
       if (failedImages.length > 0) {
-        console.warn(`${failedImages.length} images failed to load`);
+        console.warn(`Survey: ${failedImages.length} images failed to load`);
       }
       
       // Set up session data for Qualtrics
@@ -258,9 +276,23 @@ const Survey = () => {
         isTestMode: sessionStorage.getItem('testMode') === 'true'
       });
       
+      // Success message
+      toast({
+        title: 'Study Loaded Successfully',
+        description: `Ready to evaluate ${validImages.length} images`,
+        status: 'success',
+        duration: 3000,
+      });
+      
     } catch (error) {
-      console.error('Error loading user data:', error);
+      console.error('Survey: Error loading user data:', error);
       setError(`Failed to load study data: ${error.message}`);
+      toast({
+        title: 'Error Loading Study',
+        description: error.message,
+        status: 'error',
+        duration: 5000,
+      });
     } finally {
       setLoading(false);
     }
@@ -268,6 +300,7 @@ const Survey = () => {
 
   // Initialize component
   useEffect(() => {
+    console.log('Survey: Component mounting, loading user data...');
     loadUserData();
   }, [loadUserData]);
 
@@ -276,7 +309,7 @@ const Survey = () => {
     const handleQualtricsMessage = (event) => {
       try {
         if (event.data && typeof event.data === 'object') {
-          console.log('Received message from Qualtrics:', event.data);
+          console.log('Survey: Received message from Qualtrics:', event.data);
           
           if (event.data.type === 'survey_completed') {
             handleSurveyCompletion(event.data);
@@ -286,15 +319,15 @@ const Survey = () => {
           }
         }
       } catch (error) {
-        console.error('Error handling Qualtrics message:', error);
+        console.error('Survey: Error handling Qualtrics message:', error);
       }
     };
 
-    console.log('Setting up Qualtrics message listener');
+    console.log('Survey: Setting up Qualtrics message listener');
     window.addEventListener('message', handleQualtricsMessage);
     
     return () => {
-      console.log('Cleaning up Qualtrics message listener');
+      console.log('Survey: Cleaning up Qualtrics message listener');
       window.removeEventListener('message', handleQualtricsMessage);
     };
   }, [currentImageIndex]);
@@ -306,11 +339,11 @@ const Survey = () => {
       const currentImage = images[currentImageIndex];
       
       if (!currentImage || !userId) {
-        console.error('Missing required data for survey completion');
+        console.error('Survey: Missing required data for survey completion');
         return;
       }
 
-      console.log('Processing survey completion for image:', currentImage.id);
+      console.log('Survey: Processing survey completion for image:', currentImage.id);
       
       // Update completed images tracking
       const newCompletedImages = new Set(completedImages);
@@ -333,7 +366,7 @@ const Survey = () => {
         }
       });
       
-      console.log(`Updated user progress: ${newCompletedCount}/${images.length} images completed`);
+      console.log(`Survey: Updated user progress: ${newCompletedCount}/${images.length} images completed`);
       
       toast({
         title: 'Response Saved',
@@ -371,7 +404,7 @@ const Survey = () => {
       }
       
     } catch (error) {
-      console.error('Error handling survey completion:', error);
+      console.error('Survey: Error handling survey completion:', error);
       toast({
         title: 'Error Saving Response',
         description: 'Please try again or contact support',
@@ -397,7 +430,7 @@ const Survey = () => {
     
     const baseUrl = process.env.REACT_APP_QUALTRICS_SURVEY_URL;
     if (!baseUrl) {
-      console.error('Qualtrics survey URL not configured');
+      console.error('Survey: Qualtrics survey URL not configured');
       return '';
     }
     
@@ -413,13 +446,13 @@ const Survey = () => {
     });
     
     const finalUrl = `${baseUrl}?${params.toString()}`;
-    console.log('Qualtrics URL parameters:', Object.fromEntries(params));
+    console.log('Survey: Qualtrics URL parameters:', Object.fromEntries(params));
     return finalUrl;
   };
 
   // Handle iframe load
   const handleIframeLoad = () => {
-    console.log('Survey iframe loaded for image:', images[currentImageIndex]?.id);
+    console.log('Survey: Survey iframe loaded for image:', images[currentImageIndex]?.id);
     setSurveyLoading(false);
   };
 
@@ -429,10 +462,13 @@ const Survey = () => {
   
   if (loading) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minH="100vh">
+      <Box display="flex" justifyContent="center" alignItems="center" minH="100vh" bg="gray.50">
         <VStack spacing={4}>
           <Spinner size="xl" color="blue.500" />
           <Text>Loading your assigned images...</Text>
+          <Text fontSize="sm" color="gray.600">
+            User ID: {sessionStorage.getItem('userLoginId')?.substring(0, 8)}...
+          </Text>
         </VStack>
       </Box>
     );
@@ -440,12 +476,19 @@ const Survey = () => {
 
   if (error) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minH="100vh">
+      <Box display="flex" justifyContent="center" alignItems="center" minH="100vh" bg="gray.50">
         <Alert status="error" maxW="md">
           <AlertIcon />
           <Box>
             <AlertTitle>Error Loading Study</AlertTitle>
             <AlertDescription>{error}</AlertDescription>
+            <Button 
+              mt={4} 
+              colorScheme="blue" 
+              onClick={() => navigate('/login')}
+            >
+              Return to Login
+            </Button>
           </Box>
         </Alert>
       </Box>
@@ -454,12 +497,19 @@ const Survey = () => {
 
   if (!currentImage) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minH="100vh">
+      <Box display="flex" justifyContent="center" alignItems="center" minH="100vh" bg="gray.50">
         <Alert status="warning" maxW="md">
           <AlertIcon />
           <Box>
             <AlertTitle>No Image Available</AlertTitle>
             <AlertDescription>No image data found for current index.</AlertDescription>
+            <Button 
+              mt={4} 
+              colorScheme="blue" 
+              onClick={() => navigate('/login')}
+            >
+              Return to Login
+            </Button>
           </Box>
         </Alert>
       </Box>
@@ -541,7 +591,7 @@ const Survey = () => {
                       maxH="400px"
                       objectFit="contain"
                       onError={(e) => {
-                        console.error('Image failed to load:', currentImage);
+                        console.error('Survey: Image failed to load:', currentImage);
                         e.target.style.display = 'none';
                       }}
                     />

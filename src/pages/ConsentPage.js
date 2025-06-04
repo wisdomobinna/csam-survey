@@ -1,4 +1,4 @@
-// src/pages/ConsentPage.js - FIXED VERSION
+// src/pages/ConsentPage.js - Fixed version
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
@@ -23,6 +23,7 @@ import {
   UnorderedList,
   Flex,
   Spacer,
+  Spinner,
 } from '@chakra-ui/react';
 
 const ConsentPage = () => {
@@ -30,6 +31,7 @@ const ConsentPage = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [userChecked, setUserChecked] = useState(false);
+  const [userData, setUserData] = useState(null);
   
   const navigate = useNavigate();
   const toast = useToast();
@@ -37,6 +39,7 @@ const ConsentPage = () => {
 
   useEffect(() => {
     if (!loginId) {
+      console.log('No login ID found, redirecting to login');
       navigate('/login');
       return;
     }
@@ -44,26 +47,37 @@ const ConsentPage = () => {
     // Check if user has already consented
     const checkConsent = async () => {
       try {
-        // FIXED: Use 'participants' collection instead of 'loginIDs'
-        const userRef = doc(db, 'participants', loginId);
+        console.log('Checking consent status for user:', loginId);
+        
+        const userRef = doc(db, 'loginIDs', loginId);
         const userDoc = await getDoc(userRef);
         
         if (!userDoc.exists()) {
+          console.error('User document not found:', loginId);
           setError('User not found');
           return;
         }
         
         const userData = userDoc.data();
+        console.log('User data loaded:', {
+          hasConsented: userData.hasConsented,
+          surveyCompleted: userData.surveyCompleted,
+          assignedImages: userData.assignedImages?.length
+        });
+        
+        setUserData(userData);
         
         // If user has already consented, redirect to survey
         if (userData.hasConsented) {
+          console.log('User has already consented, redirecting to survey');
           navigate('/survey');
+          return;
         }
         
         setUserChecked(true);
       } catch (error) {
         console.error('Error checking consent:', error);
-        setError('Failed to check consent status');
+        setError('Failed to check consent status: ' + error.message);
       }
     };
 
@@ -83,42 +97,65 @@ const ConsentPage = () => {
 
     try {
       setLoading(true);
+      console.log('Processing consent for user:', loginId);
       
-      // FIXED: Update user record in 'participants' collection
-      const userRef = doc(db, 'participants', loginId);
-      await updateDoc(userRef, {
+      // Update user record to indicate consent
+      const userRef = doc(db, 'loginIDs', loginId);
+      const updateData = {
         hasConsented: true,
         consentedAt: serverTimestamp(),
-        lastActiveAt: serverTimestamp(),
-        studyPhase: 'survey' // Update phase to survey
-      });
+        lastUpdated: serverTimestamp()
+      };
+      
+      console.log('Updating user document with consent...');
+      await updateDoc(userRef, updateData);
+      
+      console.log('Consent saved successfully, navigating to survey...');
       
       toast({
         title: 'Thank you',
-        description: 'Your consent has been recorded',
+        description: 'Your consent has been recorded. Proceeding to study...',
         status: 'success',
         duration: 2000,
       });
       
-      // Navigate to survey
-      navigate('/survey');
+      // Add a small delay to ensure the toast shows and database update completes
+      setTimeout(() => {
+        console.log('Navigating to survey page...');
+        navigate('/survey');
+      }, 1000);
+      
     } catch (error) {
       console.error('Error saving consent:', error);
-      setError('Failed to save your consent. Please try again.');
+      setError('Failed to save your consent: ' + error.message);
+      toast({
+        title: 'Error',
+        description: 'Failed to save consent. Please try again.',
+        status: 'error',
+        duration: 5000,
+      });
+    } finally {
       setLoading(false);
     }
   };
 
   const handleCancel = () => {
+    console.log('User cancelled consent, clearing session...');
     sessionStorage.removeItem('userLoginId');
     sessionStorage.removeItem('isAdmin');
+    sessionStorage.removeItem('prolificPid');
+    sessionStorage.removeItem('displayId');
+    sessionStorage.removeItem('testMode');
     navigate('/login');
   };
 
-  if (!userChecked) {
+  if (!userChecked && !error) {
     return (
-      <Flex minH="100vh" align="center" justify="center">
-        <Text>Checking user status...</Text>
+      <Flex minH="100vh" align="center" justify="center" bg="gray.50">
+        <VStack spacing={4}>
+          <Spinner size="xl" color="blue.500" />
+          <Text>Checking your status...</Text>
+        </VStack>
       </Flex>
     );
   }
@@ -139,6 +176,18 @@ const ConsentPage = () => {
                 </Alert>
               )}
 
+              {userData && (
+                <Alert status="info" borderRadius="md">
+                  <AlertIcon />
+                  <VStack align="start" spacing={1}>
+                    <Text fontWeight="medium">Study Information</Text>
+                    <Text fontSize="sm">
+                      You have been assigned {userData.assignedImages?.length || 0} images to evaluate.
+                    </Text>
+                  </VStack>
+                </Alert>
+              )}
+
               <Box>
                 <Heading size="md" mb={3}>Study Information</Heading>
                 <Text mb={2}>
@@ -156,7 +205,7 @@ const ConsentPage = () => {
                 <Heading size="md" mb={3}>What You Will Do</Heading>
                 <Text mb={2}>As a participant in this study, you will:</Text>
                 <OrderedList spacing={2} pl={5}>
-                  <ListItem>View a series of 5 images</ListItem>
+                  <ListItem>View a series of {userData?.assignedImages?.length || '10'} images</ListItem>
                   <ListItem>Rate each image based on various criteria using provided rating scales</ListItem>
                   <ListItem>Complete all evaluations at your own pace</ListItem>
                 </OrderedList>
@@ -235,6 +284,7 @@ const ConsentPage = () => {
                   colorScheme="red"
                   variant="outline"
                   onClick={handleCancel}
+                  isDisabled={loading}
                 >
                   Cancel
                 </Button>
@@ -245,6 +295,7 @@ const ConsentPage = () => {
                   isLoading={loading}
                   loadingText="Processing..."
                   isDisabled={!isConsented}
+                  size="lg"
                 >
                   I Consent - Proceed to Survey
                 </Button>
