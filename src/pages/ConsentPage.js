@@ -1,4 +1,4 @@
-// src/pages/ConsentPage.js - Fixed version
+// src/pages/ConsentPage.js - Updated to redirect to Demographics
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
@@ -24,6 +24,8 @@ import {
   Flex,
   Spacer,
   Spinner,
+  Badge,
+  HStack,
 } from '@chakra-ui/react';
 
 const ConsentPage = () => {
@@ -39,49 +41,67 @@ const ConsentPage = () => {
 
   useEffect(() => {
     if (!loginId) {
-      console.log('No login ID found, redirecting to login');
+      console.log('ConsentPage: No login ID found, redirecting to login');
       navigate('/login');
       return;
     }
 
-    // Check if user has already consented
-    const checkConsent = async () => {
+    // Check user's current progress and redirect appropriately
+    const checkUserProgress = async () => {
       try {
-        console.log('Checking consent status for user:', loginId);
+        console.log('ConsentPage: Checking user progress for:', loginId);
         
         const userRef = doc(db, 'loginIDs', loginId);
         const userDoc = await getDoc(userRef);
         
         if (!userDoc.exists()) {
-          console.error('User document not found:', loginId);
+          console.error('ConsentPage: User document not found:', loginId);
           setError('User not found');
           return;
         }
         
         const userData = userDoc.data();
-        console.log('User data loaded:', {
+        console.log('ConsentPage: User data loaded:', {
           hasConsented: userData.hasConsented,
+          demographicsCompleted: userData.demographicsCompleted,
           surveyCompleted: userData.surveyCompleted,
           assignedImages: userData.assignedImages?.length
         });
         
         setUserData(userData);
         
-        // If user has already consented, redirect to survey
-        if (userData.hasConsented) {
-          console.log('User has already consented, redirecting to survey');
+        // Redirect based on user's progress through the study flow
+        if (userData.surveyCompleted) {
+          console.log('ConsentPage: User has completed entire study, redirecting to completion');
+          navigate('/completion');
+          return;
+        }
+        
+        if (userData.hasConsented && userData.demographicsCompleted) {
+          console.log('ConsentPage: User has consented and completed demographics, redirecting to main survey');
           navigate('/survey');
           return;
         }
         
+        if (userData.hasConsented && !userData.demographicsCompleted) {
+          console.log('ConsentPage: User has consented but not completed demographics, redirecting to demographics');
+          navigate('/demographics');
+          return;
+        }
+        
+        // If user hasn't consented, stay on this page
+        if (!userData.hasConsented) {
+          console.log('ConsentPage: User has not consented, showing consent form');
+        }
+        
         setUserChecked(true);
       } catch (error) {
-        console.error('Error checking consent:', error);
-        setError('Failed to check consent status: ' + error.message);
+        console.error('ConsentPage: Error checking user progress:', error);
+        setError('Failed to check user status: ' + error.message);
       }
     };
 
-    checkConsent();
+    checkUserProgress();
   }, [loginId, navigate]);
 
   const handleConsent = async () => {
@@ -97,7 +117,7 @@ const ConsentPage = () => {
 
     try {
       setLoading(true);
-      console.log('Processing consent for user:', loginId);
+      console.log('ConsentPage: Processing consent for user:', loginId);
       
       // Update user record to indicate consent
       const userRef = doc(db, 'loginIDs', loginId);
@@ -107,26 +127,26 @@ const ConsentPage = () => {
         lastUpdated: serverTimestamp()
       };
       
-      console.log('Updating user document with consent...');
+      console.log('ConsentPage: Updating user document with consent...');
       await updateDoc(userRef, updateData);
       
-      console.log('Consent saved successfully, navigating to survey...');
+      console.log('ConsentPage: Consent saved successfully, navigating to demographics...');
       
       toast({
         title: 'Thank you',
-        description: 'Your consent has been recorded. Proceeding to study...',
+        description: 'Your consent has been recorded. Proceeding to demographics survey...',
         status: 'success',
         duration: 2000,
       });
       
-      // Add a small delay to ensure the toast shows and database update completes
+      // Navigate to demographics instead of survey
       setTimeout(() => {
-        console.log('Navigating to survey page...');
-        navigate('/survey');
+        console.log('ConsentPage: Navigating to demographics page...');
+        navigate('/demographics');
       }, 1000);
       
     } catch (error) {
-      console.error('Error saving consent:', error);
+      console.error('ConsentPage: Error saving consent:', error);
       setError('Failed to save your consent: ' + error.message);
       toast({
         title: 'Error',
@@ -140,7 +160,7 @@ const ConsentPage = () => {
   };
 
   const handleCancel = () => {
-    console.log('User cancelled consent, clearing session...');
+    console.log('ConsentPage: User cancelled consent, clearing session...');
     sessionStorage.removeItem('userLoginId');
     sessionStorage.removeItem('isAdmin');
     sessionStorage.removeItem('prolificPid');
@@ -165,7 +185,13 @@ const ConsentPage = () => {
       <Container maxW="4xl" pt={10} pb={10}>
         <Card boxShadow="xl">
           <CardHeader bg="blue.50" borderTopRadius="lg">
-            <Heading size="lg">Research Participant Consent</Heading>
+            <VStack spacing={2}>
+              <Heading size="lg">Research Participant Consent</Heading>
+              <HStack spacing={2}>
+                <Badge colorScheme="blue">Step 1 of 3</Badge>
+                <Badge colorScheme="gray">Consent → Demographics → Main Study</Badge>
+              </HStack>
+            </VStack>
           </CardHeader>
           <CardBody>
             <VStack spacing={6} align="stretch">
@@ -183,6 +209,9 @@ const ConsentPage = () => {
                     <Text fontWeight="medium">Study Information</Text>
                     <Text fontSize="sm">
                       You have been assigned {userData.assignedImages?.length || 0} images to evaluate.
+                    </Text>
+                    <Text fontSize="sm" color="blue.600">
+                      After consent, you'll complete a brief demographics survey, then proceed to the main study.
                     </Text>
                   </VStack>
                 </Alert>
@@ -202,12 +231,12 @@ const ConsentPage = () => {
               <Divider />
               
               <Box>
-                <Heading size="md" mb={3}>What You Will Do</Heading>
-                <Text mb={2}>As a participant in this study, you will:</Text>
+                <Heading size="md" mb={3}>Study Process</Heading>
+                <Text mb={2}>This study consists of three steps:</Text>
                 <OrderedList spacing={2} pl={5}>
-                  <ListItem>View a series of {userData?.assignedImages?.length || '10'} images</ListItem>
-                  <ListItem>Rate each image based on various criteria using provided rating scales</ListItem>
-                  <ListItem>Complete all evaluations at your own pace</ListItem>
+                  <ListItem><strong>Consent</strong> - Review and agree to participate (this page)</ListItem>
+                  <ListItem><strong>Demographics</strong> - Complete a brief demographic questionnaire (2-3 minutes)</ListItem>
+                  <ListItem><strong>Main Study</strong> - View and evaluate {userData?.assignedImages?.length || '10'} images using provided rating scales</ListItem>
                 </OrderedList>
               </Box>
               
@@ -216,9 +245,12 @@ const ConsentPage = () => {
               <Box>
                 <Heading size="md" mb={3}>Time Commitment</Heading>
                 <Text>
-                  The entire process is expected to take approximately 15-20 minutes, depending on how long you choose
-                  to spend viewing each image.
+                  The entire process is expected to take approximately 20-25 minutes total:
                 </Text>
+                <UnorderedList spacing={1} pl={5} mt={2}>
+                  <ListItem>Demographics survey: 2-3 minutes</ListItem>
+                  <ListItem>Main image evaluation: 15-20 minutes</ListItem>
+                </UnorderedList>
               </Box>
               
               <Divider />
@@ -237,7 +269,7 @@ const ConsentPage = () => {
                   Your responses will be recorded and stored securely. All data will be anonymized for analysis and reporting.
                 </Text>
                 <Text>
-                  We will not collect any personally identifiable information beyond your assigned login ID.
+                  We will collect basic demographic information and your image ratings. No personally identifiable information beyond your assigned login ID will be stored.
                 </Text>
               </Box>
               
@@ -297,7 +329,7 @@ const ConsentPage = () => {
                   isDisabled={!isConsented}
                   size="lg"
                 >
-                  I Consent - Proceed to Survey
+                  I Consent - Continue to Demographics
                 </Button>
               </Flex>
             </VStack>

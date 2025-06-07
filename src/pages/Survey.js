@@ -1,4 +1,4 @@
-// src/pages/Survey.js - Complete fixed version
+// src/pages/Survey.js - Complete fixed version with proper navigation controls
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
@@ -38,7 +38,9 @@ const Survey = () => {
   const [surveyLoading, setSurveyLoading] = useState(false);
   const [completedImages, setCompletedImages] = useState(new Set());
   const [qualtricsReady, setQualtricsReady] = useState(false);
+  const [qualtricsCompleted, setQualtricsCompleted] = useState(false);
   const [sessionData, setSessionData] = useState({});
+  const [processingNext, setProcessingNext] = useState(false);
   const navigate = useNavigate();
   const toast = useToast();
   const iframeRef = useRef(null);
@@ -254,9 +256,15 @@ const Survey = () => {
       }
       setCompletedImages(completed);
       
-      // Determine starting image index
-      const completedImagesCount = userData.completedImages || 0;
-      const startIndex = Math.min(completedImagesCount, validImages.length - 1);
+      // Determine starting image index (first incomplete image)
+      let startIndex = 0;
+      for (let i = 0; i < validImages.length; i++) {
+        const imageId = validImages[i].id;
+        if (!completed.has(imageId)) {
+          startIndex = i;
+          break;
+        }
+      }
       setCurrentImageIndex(startIndex);
       
       console.log(`Survey: Loaded ${validImages.length} images, starting at index ${startIndex}`);
@@ -308,16 +316,65 @@ const Survey = () => {
   useEffect(() => {
     const handleQualtricsMessage = (event) => {
       try {
+        // Log ALL messages to debug what Qualtrics is sending
+        console.log('Survey: Received message from origin:', event.origin);
+        console.log('Survey: Message data:', event.data);
+        console.log('Survey: Message type:', typeof event.data);
+        
+        // Handle different message formats that indicate the user has reached the end
         if (event.data && typeof event.data === 'object') {
-          console.log('Survey: Received message from Qualtrics:', event.data);
+          console.log('Survey: Received object message from Qualtrics:', event.data);
           
-          if (event.data.type === 'survey_completed') {
+          // Look for completion messages that indicate end of survey
+          if (event.data.type === 'survey_completed' || 
+              event.data.type === 'form_completed' ||
+              event.data.type === 'survey_end' ||
+              event.data.type === 'form_end' ||
+              event.data.action === 'completed') {
+            console.log('Survey: Qualtrics survey reached end for image:', images[currentImageIndex]?.id);
+            setQualtricsCompleted(true);
             handleSurveyCompletion(event.data);
           } else if (event.data.type === 'survey_ready') {
+            console.log('Survey: Qualtrics survey ready');
             setQualtricsReady(true);
             setSurveyLoading(false);
           }
+        } 
+        // Handle string messages that might indicate completion
+        else if (typeof event.data === 'string') {
+          console.log('Survey: Received string message:', event.data);
+          
+          // Look for various completion indicators
+          if (event.data === 'survey_completed' || 
+              event.data === 'form_completed' || 
+              event.data === 'qualtrics_completed' ||
+              event.data === 'survey_end' ||
+              event.data === 'form_end' ||
+              event.data.includes('completed') ||
+              event.data.includes('finished') ||
+              event.data.includes('end')) {
+            console.log('Survey: Qualtrics survey reached end (string message)');
+            setQualtricsCompleted(true);
+            handleSurveyCompletion({ type: 'survey_completed', data: event.data });
+          }
         }
+        
+        // Special handling for Qualtrics domain messages
+        if (event.origin && event.origin.includes('qualtrics.com')) {
+          console.log('Survey: Message from Qualtrics domain detected');
+          
+          // Check if the message indicates survey completion/end
+          if (event.data && (
+              String(event.data).includes('complete') ||
+              String(event.data).includes('finish') ||
+              String(event.data).includes('end') ||
+              String(event.data).includes('next')
+            )) {
+            console.log('Survey: Detected completion signal from Qualtrics domain');
+            setQualtricsCompleted(true);
+          }
+        }
+        
       } catch (error) {
         console.error('Survey: Error handling Qualtrics message:', error);
       }
@@ -330,9 +387,116 @@ const Survey = () => {
       console.log('Survey: Cleaning up Qualtrics message listener');
       window.removeEventListener('message', handleQualtricsMessage);
     };
+  }, [currentImageIndex, images]);
+
+  // Reset Qualtrics state when image changes
+  useEffect(() => {
+    setQualtricsCompleted(false);
+    setQualtricsReady(false);
+    setSurveyLoading(true);
   }, [currentImageIndex]);
 
-  // Handle survey completion
+  // Handle manual next button click
+  const handleNextImage = async () => {
+    if (!qualtricsCompleted) {
+      toast({
+        title: 'Survey Incomplete',
+        description: 'Please complete all survey questions before proceeding to the next image.',
+        status: 'warning',
+        duration: 4000,
+      });
+      return;
+    }
+
+    if (processingNext) {
+      return; // Prevent double-clicking
+    }
+
+    try {
+      setProcessingNext(true);
+      
+      const userId = sessionData.userId;
+      const currentImage = images[currentImageIndex];
+      
+      if (!currentImage || !userId) {
+        console.error('Survey: Missing required data for proceeding to next image');
+        return;
+      }
+
+      console.log('Survey: Manually advancing to next image after completing:', currentImage.id);
+      
+      // Update completed images tracking
+      const newCompletedImages = new Set(completedImages);
+      newCompletedImages.add(currentImage.id);
+      setCompletedImages(newCompletedImages);
+      
+      // Update user progress in Firestore
+      const userRef = doc(db, 'loginIDs', userId);
+      const newCompletedCount = newCompletedImages.size;
+      
+      await updateDoc(userRef, {
+        completedImages: newCompletedCount,
+        completedImageIds: Array.from(newCompletedImages),
+        lastImageCompleted: currentImage.id,
+        lastCompletionTime: serverTimestamp(),
+        [`imageCompletion_${currentImage.id}`]: {
+          completedAt: serverTimestamp(),
+          imageIndex: currentImageIndex
+        }
+      });
+      
+      console.log(`Survey: Updated user progress: ${newCompletedCount}/${images.length} images completed`);
+      
+      toast({
+        title: 'Response Saved',
+        description: `Image ${currentImageIndex + 1} evaluation completed`,
+        status: 'success',
+        duration: 2000,
+      });
+      
+      // Check if all images are completed
+      if (newCompletedCount >= images.length) {
+        // Mark survey as completed
+        await updateDoc(userRef, {
+          surveyCompleted: true,
+          completedAt: serverTimestamp()
+        });
+        
+        toast({
+          title: 'Study Completed!',
+          description: 'Thank you for your participation',
+          status: 'success',
+          duration: 3000,
+        });
+        
+        // Navigate to completion page
+        setTimeout(() => {
+          navigate('/completion');
+        }, 2000);
+      } else {
+        // Move to next image
+        const nextIndex = currentImageIndex + 1;
+        if (nextIndex < images.length) {
+          setCurrentImageIndex(nextIndex);
+          setQualtricsCompleted(false);
+          setQualtricsReady(false);
+        }
+      }
+      
+    } catch (error) {
+      console.error('Survey: Error advancing to next image:', error);
+      toast({
+        title: 'Error Saving Response',
+        description: 'Please try again or contact support',
+        status: 'error',
+        duration: 5000,
+      });
+    } finally {
+      setProcessingNext(false);
+    }
+  };
+
+  // Handle survey completion (automatic from Qualtrics)
   const handleSurveyCompletion = async (surveyData) => {
     try {
       const userId = sessionData.userId;
@@ -343,7 +507,7 @@ const Survey = () => {
         return;
       }
 
-      console.log('Survey: Processing survey completion for image:', currentImage.id);
+      console.log('Survey: Processing automatic survey completion for image:', currentImage.id);
       
       // Update completed images tracking
       const newCompletedImages = new Set(completedImages);
@@ -395,11 +559,14 @@ const Survey = () => {
           navigate('/completion');
         }, 2000);
       } else {
-        // Move to next image
+        // Automatically move to next image
         const nextIndex = currentImageIndex + 1;
         if (nextIndex < images.length) {
-          setCurrentImageIndex(nextIndex);
-          setQualtricsReady(false);
+          setTimeout(() => {
+            setCurrentImageIndex(nextIndex);
+            setQualtricsCompleted(false);
+            setQualtricsReady(false);
+          }, 1500); // Brief delay to show success message
         }
       }
       
@@ -411,15 +578,6 @@ const Survey = () => {
         status: 'error',
         duration: 5000,
       });
-    }
-  };
-
-  // Navigate between images
-  const navigateToImage = (index) => {
-    if (index >= 0 && index < images.length) {
-      setCurrentImageIndex(index);
-      setQualtricsReady(false);
-      setSurveyLoading(true);
     }
   };
 
@@ -516,6 +674,8 @@ const Survey = () => {
     );
   }
 
+  const isLastImage = currentImageIndex >= images.length - 1;
+
   return (
     <Box minH="100vh" bg="gray.50">
       {/* Header */}
@@ -597,30 +757,45 @@ const Survey = () => {
                     />
                   </Box>
                   
-                  {/* Image Navigation */}
-                  <HStack spacing={2} w="full" justify="center">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => navigateToImage(currentImageIndex - 1)}
-                      isDisabled={currentImageIndex === 0}
-                    >
-                      ⬅️ Previous
-                    </Button>
-                    
-                    <Text fontSize="sm" color="gray.600" minW="100px" textAlign="center">
+                  {/* Navigation - ONLY NEXT BUTTON, and only when survey is completed */}
+                  <VStack spacing={3} w="full">
+                    <Text fontSize="sm" color="gray.600" textAlign="center">
                       {currentImageIndex + 1} of {images.length}
                     </Text>
                     
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => navigateToImage(currentImageIndex + 1)}
-                      isDisabled={currentImageIndex === images.length - 1}
-                    >
-                      Next ➡️
-                    </Button>
-                  </HStack>
+                    {/* ONLY show Next button when user reaches the end of Qualtrics form */}
+                    {qualtricsCompleted && (
+                      <Button
+                        colorScheme="blue"
+                        size="lg"
+                        onClick={handleNextImage}
+                        isLoading={processingNext}
+                        loadingText={isLastImage ? "Completing Study..." : "Saving..."}
+                        w="full"
+                      >
+                        {isLastImage ? "Complete Study" : "Next Image →"}
+                      </Button>
+                    )}
+                    
+                    {/* Status message when survey is not yet completed */}
+                    {!qualtricsCompleted && (
+                      <Alert status="info" size="sm">
+                        <AlertIcon />
+                        <Text fontSize="sm">
+                          Continue answering the survey questions. The Next button will appear when you complete the form.
+                        </Text>
+                      </Alert>
+                    )}
+                    
+                    {qualtricsCompleted && !processingNext && (
+                      <Alert status="success" size="sm">
+                        <AlertIcon />
+                        <Text fontSize="sm">
+                          Survey completed! Click "Next Image" to continue
+                        </Text>
+                      </Alert>
+                    )}
+                  </VStack>
                 </VStack>
               </CardBody>
             </Card>

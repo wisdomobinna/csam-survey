@@ -1,9 +1,10 @@
-// src/App.js - Improved route protection
+// src/App.js - Updated with Demographics route
 import React, { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import { ChakraProvider, extendTheme } from '@chakra-ui/react';
 import Login from './pages/Login';
 import Survey from './pages/Survey';
+import Demographics from './pages/Demographics';
 import AdminDashboard from './pages/AdminDashboard';
 import Completion from './pages/Completion';
 import Setup from './pages/Setup';
@@ -111,7 +112,7 @@ function App() {
           {/* Setup page */}
           <Route path="/setup" element={<Setup />} />
           
-          {/* Protected study flow routes */}
+          {/* Protected study flow routes - IN ORDER */}
           <Route 
             path="/consent" 
             element={
@@ -120,6 +121,18 @@ function App() {
               </PrivateRoute>
             } 
           />
+          
+          {/* NEW: Demographics survey (one-time, after consent) */}
+          <Route 
+            path="/demographics" 
+            element={
+              <PrivateRoute>
+                <Demographics />
+              </PrivateRoute>
+            } 
+          />
+          
+          {/* Main survey (repeating, after demographics) */}
           <Route 
             path="/survey" 
             element={
@@ -128,6 +141,8 @@ function App() {
               </PrivateRoute>
             } 
           />
+          
+          {/* Completion page */}
           <Route 
             path="/completion" 
             element={
