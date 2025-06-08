@@ -1,184 +1,448 @@
-// src/pages/Setup.js - Updated setup page with migration utility
+// src/pages/Setup.js - Fixed version with 1080+ user support
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { 
+  collection, 
+  getDocs, 
+  writeBatch, 
+  doc, 
+  query, 
+  where, 
+  orderBy, 
+  limit,
+  serverTimestamp 
+} from 'firebase/firestore';
+import { ref, listAll, getMetadata } from 'firebase/storage';
+import { db, storage } from '../firebase/config';
 import {
   Box,
+  Button,
   Container,
-  Heading,
+  Text,
   VStack,
   HStack,
-  Text,
-  Button,
+  Alert,
+  AlertIcon,
   Card,
   CardBody,
   CardHeader,
-  Alert,
-  AlertIcon,
-  AlertTitle,
-  AlertDescription,
+  Heading,
   useToast,
-  Spinner,
-  Badge,
-  Icon,
-  OrderedList,
-  ListItem,
   Progress,
-  Modal,
-  ModalOverlay,
-  ModalContent,
-  ModalHeader,
-  ModalBody,
-  ModalFooter,
-  ModalCloseButton,
-  useDisclosure,
-  Code
+  Badge,
+  Stat,
+  StatLabel,
+  StatNumber,
+  StatHelpText,
+  SimpleGrid,
+  Divider,
+  NumberInput,
+  NumberInputField,
+  NumberInputStepper,
+  NumberIncrementStepper,
+  NumberDecrementStepper,
+  FormControl,
+  FormLabel,
+  FormHelperText,
+  Select,
+  Textarea,
+  Switch,
+  Spinner,
+  Flex,
+  Code,
+  Table,
+  Thead,
+  Tbody,
+  Tr,
+  Th,
+  Td,
+  TableContainer,
 } from '@chakra-ui/react';
-import {
-  Database,
-  CheckCircle,
-  AlertTriangle,
-  Settings,
-  RefreshCw,
-  Trash2,
-  Shield,
-  Image as ImageIcon,
-  Upload,
-  Play
-} from 'lucide-react';
-
-import { 
-  runCompleteMigration,
-  clearOldFirestoreData,
-  verifyStorageAccess,
-  getCurrentSystemStatus
-} from '../utils/firestoreMigration';
 
 const Setup = () => {
   const [loading, setLoading] = useState(false);
   const [systemStatus, setSystemStatus] = useState(null);
-  const [storageVerification, setStorageVerification] = useState(null);
-  const [migrationProgress, setMigrationProgress] = useState(0);
-  const [migrationStatus, setMigrationStatus] = useState('');
-  const [migrationResults, setMigrationResults] = useState(null);
-  const [verifying, setVerifying] = useState(false);
-
-  const { isOpen: isMigrationModalOpen, onOpen: onMigrationModalOpen, onClose: onMigrationModalClose } = useDisclosure();
+  const [error, setError] = useState('');
+  const [setupProgress, setSetupProgress] = useState(0);
+  const [setupLogs, setSetupLogs] = useState([]);
+  const [setupConfig, setSetupConfig] = useState({
+    numberOfUsers: 1080,
+    imagesPerUser: 10,
+    useRandomAssignment: true,
+    setDistribution: 'balanced', // 'balanced', 'set1_only', 'set2_only'
+    testMode: false,
+    batchSize: 50 // Process users in batches to avoid timeouts
+  });
+  const [isGeneratingUsers, setIsGeneratingUsers] = useState(false);
   
   const navigate = useNavigate();
   const toast = useToast();
 
-  useEffect(() => {
-    // Check if user is admin
-    const isAdmin = sessionStorage.getItem('isAdmin');
-    if (!isAdmin || isAdmin !== 'true') {
-      navigate('/login');
-    } else {
-      // Load current system status
-      loadSystemStatus();
-    }
-  }, [navigate, loadSystemStatus]);
+  // Add log entry
+  const addLog = useCallback((message, type = 'info') => {
+    const timestamp = new Date().toLocaleTimeString();
+    setSetupLogs(prev => [...prev, {
+      id: Date.now(),
+      timestamp,
+      message,
+      type
+    }]);
+    console.log(`Setup [${timestamp}]:`, message);
+  }, []);
 
+  // Load system status - DEFINED BEFORE USE
   const loadSystemStatus = useCallback(async () => {
     try {
-      setVerifying(true);
+      setLoading(true);
+      addLog('Loading system status...');
       
-      console.log('Loading system status...');
-      const status = await getCurrentSystemStatus();
-      setSystemStatus(status);
+      // Check images in storage
+      const set1Ref = ref(storage, 'set1');
+      const set2Ref = ref(storage, 'set2');
       
-      console.log('System status:', status);
+      const [set1Files, set2Files] = await Promise.all([
+        listAll(set1Ref).catch(() => ({ items: [] })),
+        listAll(set2Ref).catch(() => ({ items: [] }))
+      ]);
+      
+      const set1Count = set1Files.items.length;
+      const set2Count = set2Files.items.length;
+      const totalImages = set1Count + set2Count;
+      
+      addLog(`Found ${set1Count} images in set1, ${set2Count} images in set2`);
+      
+      // Check existing users
+      const usersRef = collection(db, 'loginIDs');
+      const usersSnapshot = await getDocs(usersRef);
+      const totalUsers = usersSnapshot.size;
+      
+      // Count users by status
+      let activeUsers = 0;
+      let completedUsers = 0;
+      let consentedUsers = 0;
+      let demographicsCompletedUsers = 0;
+      
+      usersSnapshot.forEach(doc => {
+        const userData = doc.data();
+        if (userData.surveyCompleted) completedUsers++;
+        else if (userData.hasConsented) {
+          activeUsers++;
+          consentedUsers++;
+        }
+        if (userData.demographicsCompleted) demographicsCompletedUsers++;
+      });
+      
+      addLog(`Found ${totalUsers} existing users: ${completedUsers} completed, ${activeUsers} active`);
+      
+      setSystemStatus({
+        images: {
+          set1: set1Count,
+          set2: set2Count,
+          total: totalImages
+        },
+        users: {
+          total: totalUsers,
+          active: activeUsers,
+          completed: completedUsers,
+          consented: consentedUsers,
+          demographicsCompleted: demographicsCompletedUsers
+        },
+        lastUpdated: new Date()
+      });
+      
+      addLog('System status loaded successfully', 'success');
       
     } catch (error) {
-      console.error('Error loading system status:', error);
-      toast({
-        title: 'Status Check Failed',
-        description: error.message,
-        status: 'error',
-        duration: 5000,
-      });
+      console.error('Setup: Error loading system status:', error);
+      setError(`Failed to load system status: ${error.message}`);
+      addLog(`Error loading system status: ${error.message}`, 'error');
     } finally {
-      setVerifying(false);
+      setLoading(false);
     }
-  }, [toast]);
+  }, [addLog]);
 
-  const handleVerifyStorage = async () => {
-    try {
-      setVerifying(true);
+  // Initialize component
+  useEffect(() => {
+    const isAdmin = sessionStorage.getItem('isAdmin');
+    const loginId = sessionStorage.getItem('userLoginId');
+    
+    if (isAdmin !== 'true' || loginId !== 'ADMIN') {
+      console.log('Setup: Non-admin access attempt, redirecting...');
+      navigate('/login');
+      return;
+    }
+    
+    addLog('Setup page initialized by admin');
+    loadSystemStatus();
+  }, [navigate, loadSystemStatus, addLog]);
+
+  // Generate image assignments for a user
+  const generateImageAssignment = useCallback((userIndex, totalUsers, availableImages) => {
+    const { imagesPerUser, useRandomAssignment, setDistribution } = setupConfig;
+    
+    let candidateImages = [...availableImages];
+    
+    // Filter by set distribution
+    if (setDistribution === 'set1_only') {
+      candidateImages = candidateImages.filter(img => img.set === 'set1');
+    } else if (setDistribution === 'set2_only') {
+      candidateImages = candidateImages.filter(img => img.set === 'set2');
+    }
+    
+    if (candidateImages.length < imagesPerUser) {
+      throw new Error(`Not enough images available for assignment. Need ${imagesPerUser}, have ${candidateImages.length}`);
+    }
+    
+    let selectedImages;
+    
+    if (useRandomAssignment) {
+      // Random assignment
+      const shuffled = [...candidateImages].sort(() => Math.random() - 0.5);
+      selectedImages = shuffled.slice(0, imagesPerUser);
+    } else {
+      // Systematic assignment (ensures even distribution)
+      const step = Math.floor(candidateImages.length / imagesPerUser);
+      const startIndex = (userIndex * step) % candidateImages.length;
       
-      toast({
-        title: 'Verifying Storage',
-        description: 'Checking access to Firebase Storage images...',
-        status: 'info',
-        duration: 2000,
-      });
+      selectedImages = [];
+      for (let i = 0; i < imagesPerUser; i++) {
+        const index = (startIndex + i * step) % candidateImages.length;
+        selectedImages.push(candidateImages[index]);
+      }
+    }
+    
+    return selectedImages;
+  }, [setupConfig]);
 
-      const verification = await verifyStorageAccess();
-      setStorageVerification(verification);
-
-      if (verification.allAccessible) {
-        toast({
-          title: 'Storage Verified',
-          description: `All ${verification.totalTested} test images are accessible`,
-          status: 'success',
-          duration: 3000,
-        });
-      } else {
-        toast({
-          title: 'Storage Issues Found',
-          description: `Only ${verification.accessibleCount}/${verification.totalTested} images accessible`,
-          status: 'warning',
-          duration: 5000,
+  // Generate all available images list
+  const generateAvailableImages = useCallback(async () => {
+    addLog('Generating available images list...');
+    
+    const set1Ref = ref(storage, 'set1');
+    const set2Ref = ref(storage, 'set2');
+    
+    const [set1Files, set2Files] = await Promise.all([
+      listAll(set1Ref),
+      listAll(set2Ref)
+    ]);
+    
+    const allImages = [];
+    
+    // Process set1 images
+    set1Files.items.forEach(item => {
+      const name = item.name;
+      if (name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg')) {
+        const numberMatch = name.match(/(\d+)/);
+        const imageNumber = numberMatch ? parseInt(numberMatch[1]) : Math.random() * 10000;
+        
+        allImages.push({
+          id: `set1_${imageNumber}`,
+          name: name,
+          set: 'set1',
+          path: `set1/${name}`,
+          number: imageNumber
         });
       }
+    });
+    
+    // Process set2 images
+    set2Files.items.forEach(item => {
+      const name = item.name;
+      if (name.endsWith('.png') || name.endsWith('.jpg') || name.endsWith('.jpeg')) {
+        const numberMatch = name.match(/(\d+)/);
+        const imageNumber = numberMatch ? parseInt(numberMatch[1]) : Math.random() * 10000;
+        
+        allImages.push({
+          id: `set2_${imageNumber}`,
+          name: name,
+          set: 'set2',
+          path: `set2/${name}`,
+          number: imageNumber
+        });
+      }
+    });
+    
+    // Sort by set and number for consistent ordering
+    allImages.sort((a, b) => {
+      if (a.set !== b.set) return a.set.localeCompare(b.set);
+      return a.number - b.number;
+    });
+    
+    addLog(`Generated ${allImages.length} available images`);
+    return allImages;
+  }, [addLog]);
+
+  // Generate multiple users in batches
+  const generateUsers = useCallback(async () => {
+    if (isGeneratingUsers) return;
+    
+    try {
+      setIsGeneratingUsers(true);
+      setSetupProgress(0);
+      setSetupLogs([]);
       
-    } catch (error) {
-      console.error('Storage verification error:', error);
+      const { numberOfUsers, batchSize } = setupConfig;
+      
+      addLog(`Starting generation of ${numberOfUsers} users in batches of ${batchSize}...`);
+      
+      // Generate available images
+      const availableImages = await generateAvailableImages();
+      
+      if (availableImages.length === 0) {
+        throw new Error('No images found in storage. Please upload images first.');
+      }
+      
+      addLog(`Using ${availableImages.length} available images for assignment`);
+      
+      // Process users in batches to avoid Firestore limits and timeouts
+      const totalBatches = Math.ceil(numberOfUsers / batchSize);
+      let totalCreated = 0;
+      
+      for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+        const batchStart = batchIndex * batchSize;
+        const batchEnd = Math.min(batchStart + batchSize, numberOfUsers);
+        const batchUsers = batchEnd - batchStart;
+        
+        addLog(`Processing batch ${batchIndex + 1}/${totalBatches}: users ${batchStart + 1}-${batchEnd}`);
+        
+        // Create batch
+        const batch = writeBatch(db);
+        
+        for (let userIndex = batchStart; userIndex < batchEnd; userIndex++) {
+          // Generate unique user ID
+          const userId = `USER_${String(userIndex + 1).padStart(4, '0')}_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+          
+          // Generate image assignment for this user
+          const assignedImages = generateImageAssignment(userIndex, numberOfUsers, availableImages);
+          
+          // Create user document
+          const userDoc = {
+            id: userId,
+            createdAt: serverTimestamp(),
+            isTestUser: setupConfig.testMode,
+            hasConsented: false,
+            demographicsCompleted: false,
+            surveyCompleted: false,
+            assignedImages: assignedImages,
+            totalImages: assignedImages.length,
+            completedImages: 0,
+            completedImageIds: [],
+            userIndex: userIndex + 1,
+            batchIndex: batchIndex + 1,
+            setupConfig: {
+              imagesPerUser: setupConfig.imagesPerUser,
+              setDistribution: setupConfig.setDistribution,
+              useRandomAssignment: setupConfig.useRandomAssignment
+            }
+          };
+          
+          // Add to batch
+          const userRef = doc(db, 'loginIDs', userId);
+          batch.set(userRef, userDoc);
+        }
+        
+        // Commit batch
+        await batch.commit();
+        totalCreated += batchUsers;
+        
+        // Update progress
+        const progress = Math.round((totalCreated / numberOfUsers) * 100);
+        setSetupProgress(progress);
+        
+        addLog(`Batch ${batchIndex + 1} completed: ${batchUsers} users created (${totalCreated}/${numberOfUsers} total)`);
+        
+        // Brief pause between batches to avoid overwhelming Firestore
+        if (batchIndex < totalBatches - 1) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      }
+      
+      addLog(`Successfully created ${totalCreated} users!`, 'success');
+      
       toast({
-        title: 'Verification Failed',
-        description: error.message,
-        status: 'error',
+        title: 'Users Generated Successfully',
+        description: `Created ${totalCreated} users with image assignments`,
+        status: 'success',
         duration: 5000,
       });
+      
+      // Reload system status
+      await loadSystemStatus();
+      
+    } catch (error) {
+      console.error('Setup: Error generating users:', error);
+      addLog(`Error generating users: ${error.message}`, 'error');
+      toast({
+        title: 'Error Generating Users',
+        description: error.message,
+        status: 'error',
+        duration: 8000,
+      });
     } finally {
-      setVerifying(false);
+      setIsGeneratingUsers(false);
+      setSetupProgress(0);
     }
-  };
+  }, [setupConfig, isGeneratingUsers, generateImageAssignment, generateAvailableImages, addLog, toast, loadSystemStatus]);
 
-  const handleRunMigration = async () => {
-    onMigrationModalOpen();
+  // Clear all users
+  const clearAllUsers = useCallback(async () => {
+    if (!window.confirm('Are you sure you want to delete ALL users? This cannot be undone!')) {
+      return;
+    }
     
     try {
       setLoading(true);
-      setMigrationProgress(0);
-      setMigrationStatus('Starting migration...');
-      setMigrationResults(null);
+      addLog('Clearing all users...');
       
-      const results = await runCompleteMigration((progress, status) => {
-        setMigrationProgress(progress);
-        setMigrationStatus(status);
+      const usersRef = collection(db, 'loginIDs');
+      const snapshot = await getDocs(usersRef);
+      
+      const batches = [];
+      let currentBatch = writeBatch(db);
+      let operationCount = 0;
+      
+      snapshot.forEach((doc) => {
+        // Skip admin user
+        if (doc.id === 'ADMIN') return;
+        
+        currentBatch.delete(doc.ref);
+        operationCount++;
+        
+        // Firestore batch limit is 500 operations
+        if (operationCount === 450) {
+          batches.push(currentBatch);
+          currentBatch = writeBatch(db);
+          operationCount = 0;
+        }
       });
       
-      setMigrationResults(results);
+      // Add final batch if it has operations
+      if (operationCount > 0) {
+        batches.push(currentBatch);
+      }
+      
+      // Commit all batches
+      for (let i = 0; i < batches.length; i++) {
+        await batches[i].commit();
+        addLog(`Deleted batch ${i + 1}/${batches.length}`);
+      }
+      
+      addLog(`Successfully deleted ${snapshot.size - 1} users`, 'success');
       
       toast({
-        title: 'Migration Complete!',
-        description: `Successfully created ${results.createResults.totalCreated} login IDs`,
+        title: 'Users Cleared',
+        description: 'All non-admin users have been deleted',
         status: 'success',
-        duration: 5000,
+        duration: 3000,
       });
       
-      // Reload system status
       await loadSystemStatus();
       
     } catch (error) {
-      console.error('Migration error:', error);
-      setMigrationResults({
-        success: false,
-        error: error.message
-      });
-      
+      console.error('Setup: Error clearing users:', error);
+      addLog(`Error clearing users: ${error.message}`, 'error');
       toast({
-        title: 'Migration Failed',
+        title: 'Error Clearing Users',
         description: error.message,
         status: 'error',
         duration: 5000,
@@ -186,382 +450,314 @@ const Setup = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [addLog, toast, loadSystemStatus]);
 
-  const handleClearOldData = async () => {
-    if (!window.confirm('Clear all old Firestore data? This will delete the old system collections but keep any new pre-assigned data.')) {
-      return;
-    }
-
-    try {
-      setLoading(true);
-      
-      toast({
-        title: 'Clearing Old Data',
-        description: 'Removing old Firestore collections...',
-        status: 'warning',
-        duration: 3000,
-      });
-
-      const results = await clearOldFirestoreData();
-
-      toast({
-        title: 'Old Data Cleared',
-        description: `Deleted ${results.totalDeleted} documents from ${results.deleted.length} collections`,
-        status: 'success',
-        duration: 3000,
-      });
-
-      // Reload system status
-      await loadSystemStatus();
-      
-    } catch (error) {
-      console.error('Clear data error:', error);
-      toast({
-        title: 'Clear Failed',
-        description: error.message,
-        status: 'error',
-        duration: 5000,
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const isSystemInitialized = systemStatus && systemStatus.initialized;
-  const hasCorrectLoginCount = systemStatus && systemStatus.totalLoginIds === systemStatus.expectedLoginIds;
+  if (loading && !systemStatus) {
+    return (
+      <Flex minH="100vh" align="center" justify="center" bg="gray.50">
+        <VStack spacing={4}>
+          <Spinner size="xl" color="blue.500" />
+          <Text>Loading system status...</Text>
+        </VStack>
+      </Flex>
+    );
+  }
 
   return (
     <Box minH="100vh" bg="gray.50">
-      <Container maxW="4xl" py={8}>
+      <Container maxW="6xl" py={6}>
         <VStack spacing={6}>
           {/* Header */}
           <Card w="full">
             <CardHeader>
-              <HStack>
-                <Icon as={Settings} color="blue.500" />
-                <Heading size="lg">System Migration & Setup</Heading>
+              <HStack justify="space-between">
+                <VStack align="start" spacing={1}>
+                  <Heading size="lg">System Setup & Administration</Heading>
+                  <HStack spacing={2}>
+                    <Badge colorScheme="red">Admin Only</Badge>
+                    <Badge colorScheme="blue">1080+ User Support</Badge>
+                  </HStack>
+                </VStack>
+                <Button
+                  colorScheme="gray"
+                  variant="outline"
+                  onClick={() => navigate('/admin')}
+                >
+                  ← Back to Dashboard
+                </Button>
               </HStack>
             </CardHeader>
-            <CardBody>
-              <VStack spacing={4}>
-                <Text color="gray.600">
-                  Migrate from the old dynamic assignment system to the new pre-assigned login ID system.
-                </Text>
-                
-                <HStack spacing={4} flexWrap="wrap">
-                  <Button
-                    leftIcon={<Database />}
-                    colorScheme="blue"
-                    onClick={handleVerifyStorage}
-                    isLoading={verifying}
-                    loadingText="Verifying..."
-                  >
-                    Verify Storage Access
-                  </Button>
-                  
-                  <Button
-                    leftIcon={<Upload />}
-                    colorScheme="green"
-                    onClick={handleRunMigration}
-                    isLoading={loading}
-                    loadingText="Migrating..."
-                    isDisabled={isSystemInitialized && hasCorrectLoginCount}
-                  >
-                    Run Complete Migration
-                  </Button>
-                  
-                  <Button
-                    leftIcon={<RefreshCw />}
-                    colorScheme="orange"
-                    variant="outline"
-                    onClick={loadSystemStatus}
-                    isLoading={verifying}
-                  >
-                    Refresh Status
-                  </Button>
-                  
-                  <Button
-                    leftIcon={<Trash2 />}
-                    colorScheme="red"
-                    variant="outline"
-                    onClick={handleClearOldData}
-                    isLoading={loading}
-                  >
-                    Clear Old Data Only
-                  </Button>
-                </HStack>
-              </VStack>
-            </CardBody>
           </Card>
 
-          {/* Current System Status */}
+          {error && (
+            <Alert status="error" w="full">
+              <AlertIcon />
+              {error}
+            </Alert>
+          )}
+
+          {/* System Status */}
           {systemStatus && (
             <Card w="full">
               <CardHeader>
-                <HStack>
-                  <Icon 
-                    as={isSystemInitialized ? CheckCircle : AlertTriangle} 
-                    color={isSystemInitialized ? "green.500" : "orange.500"} 
-                  />
-                  <Heading size="md">
-                    Current System Status: {isSystemInitialized ? 'Initialized' : 'Not Initialized'}
-                  </Heading>
+                <HStack justify="space-between">
+                  <Heading size="md">System Status</Heading>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={loadSystemStatus}
+                    isLoading={loading}
+                  >
+                    🔄 Refresh
+                  </Button>
                 </HStack>
               </CardHeader>
               <CardBody>
-                <VStack spacing={4} align="start">
-                  {isSystemInitialized ? (
-                    <>
-                      <Alert status="success">
-                        <AlertIcon />
-                        <Box>
-                          <AlertTitle>System Initialized!</AlertTitle>
-                          <AlertDescription>
-                            Pre-assigned login system is operational with {systemStatus.totalLoginIds} login IDs.
-                          </AlertDescription>
-                        </Box>
-                      </Alert>
-                      
-                      <HStack spacing={8} w="full">
-                        <VStack align="start">
-                          <Text fontSize="sm" fontWeight="bold">System Details</Text>
-                          <HStack spacing={4}>
-                            <Badge colorScheme="green">Version: {systemStatus.systemVersion}</Badge>
-                            <Badge colorScheme="blue">Login IDs: {systemStatus.totalLoginIds}</Badge>
-                            <Badge colorScheme="purple">Expected: {systemStatus.expectedLoginIds}</Badge>
-                          </HStack>
-                          {hasCorrectLoginCount ? (
-                            <Badge colorScheme="green">✅ Correct login count</Badge>
-                          ) : (
-                            <Badge colorScheme="red">❌ Login count mismatch</Badge>
-                          )}
-                        </VStack>
-                      </HStack>
-                    </>
-                  ) : (
-                    <Alert status="warning">
-                      <AlertIcon />
-                      <Box>
-                        <AlertTitle>System Not Initialized</AlertTitle>
-                        <AlertDescription>
-                          Run the complete migration to set up the pre-assigned login ID system.
-                        </AlertDescription>
-                      </Box>
-                    </Alert>
-                  )}
-                </VStack>
-              </CardBody>
-            </Card>
-          )}
-
-          {/* Storage Verification Results */}
-          {storageVerification && (
-            <Card w="full">
-              <CardHeader>
-                <HStack>
-                  <Icon 
-                    as={storageVerification.allAccessible ? CheckCircle : AlertTriangle} 
-                    color={storageVerification.allAccessible ? "green.500" : "red.500"} 
-                  />
-                  <Heading size="md">
-                    Storage Access: {storageVerification.allAccessible ? 'All Images Accessible' : 'Issues Found'}
-                  </Heading>
-                </HStack>
-              </CardHeader>
-              <CardBody>
-                <VStack spacing={4} align="start">
-                  {storageVerification.allAccessible ? (
-                    <Alert status="success">
-                      <AlertIcon />
-                      <Box>
-                        <AlertTitle>Storage Ready!</AlertTitle>
-                        <AlertDescription>
-                          All {storageVerification.totalTested} test images are accessible in Firebase Storage.
-                        </AlertDescription>
-                      </Box>
-                    </Alert>
-                  ) : (
-                    <Alert status="error">
-                      <AlertIcon />
-                      <Box>
-                        <AlertTitle>Storage Issues Detected</AlertTitle>
-                        <AlertDescription>
-                          Only {storageVerification.accessibleCount}/{storageVerification.totalTested} test images are accessible.
-                        </AlertDescription>
-                      </Box>
-                    </Alert>
-                  )}
+                <SimpleGrid columns={{ base: 1, md: 2, lg: 4 }} spacing={4}>
+                  <Stat>
+                    <StatLabel>Total Images</StatLabel>
+                    <StatNumber>{systemStatus.images.total}</StatNumber>
+                    <StatHelpText>
+                      Set1: {systemStatus.images.set1} | Set2: {systemStatus.images.set2}
+                    </StatHelpText>
+                  </Stat>
                   
-                  <Box w="full">
-                    <Text fontWeight="bold" mb={2}>Test Results:</Text>
-                    <VStack spacing={2} align="start">
-                      {storageVerification.results.map((result, index) => (
-                        <HStack key={index}>
-                          <Icon 
-                            as={result.accessible ? CheckCircle : AlertTriangle}
-                            color={result.accessible ? 'green.500' : 'red.500'}
-                            size={16}
-                          />
-                          <Text fontSize="sm">
-                            {result.path}: {result.accessible ? 'Accessible' : result.error}
-                          </Text>
-                        </HStack>
-                      ))}
-                    </VStack>
-                  </Box>
-                </VStack>
+                  <Stat>
+                    <StatLabel>Total Users</StatLabel>
+                    <StatNumber>{systemStatus.users.total}</StatNumber>
+                    <StatHelpText>
+                      Active: {systemStatus.users.active} | Completed: {systemStatus.users.completed}
+                    </StatHelpText>
+                  </Stat>
+                  
+                  <Stat>
+                    <StatLabel>Consented Users</StatLabel>
+                    <StatNumber>{systemStatus.users.consented}</StatNumber>
+                    <StatHelpText>
+                      Have agreed to participate
+                    </StatHelpText>
+                  </Stat>
+                  
+                  <Stat>
+                    <StatLabel>Demographics Complete</StatLabel>
+                    <StatNumber>{systemStatus.users.demographicsCompleted}</StatNumber>
+                    <StatHelpText>
+                      Finished demographics survey
+                    </StatHelpText>
+                  </Stat>
+                </SimpleGrid>
               </CardBody>
             </Card>
           )}
 
-          {/* Migration Instructions */}
+          {/* User Generation Configuration */}
           <Card w="full">
             <CardHeader>
-              <HStack>
-                <Icon as={ImageIcon} color="purple.500" />
-                <Heading size="md">Migration Instructions</Heading>
-              </HStack>
+              <Heading size="md">Generate Study Participants</Heading>
             </CardHeader>
             <CardBody>
-              <VStack spacing={4} align="start">
-                <Text fontWeight="bold">What the migration does:</Text>
-                <OrderedList spacing={2} fontSize="sm">
-                  <ListItem>
-                    <strong>Clears old collections:</strong> Removes <Code>imageAssignments</Code>, <Code>images</Code>, <Code>loginIDs</Code>, <Code>userProgress</Code>, <Code>system</Code>, and <Code>test</Code>
-                  </ListItem>
-                  <ListItem>
-                    <strong>Creates pre-assigned logins:</strong> Generates 1100 login IDs (0001-1100) with balanced image assignments
-                  </ListItem>
-                  <ListItem>
-                    <strong>Balances assignments:</strong> Each image gets assigned to exactly 5 participants maximum
-                  </ListItem>
-                  <ListItem>
-                    <strong>Verifies image URLs:</strong> Tests access to Firebase Storage images during creation
-                  </ListItem>
-                  <ListItem>
-                    <strong>Creates new collections:</strong> Sets up <Code>preAssignedLogins</Code>, <Code>imageMetadata</Code>, and <Code>systemConfig</Code>
-                  </ListItem>
-                </OrderedList>
-                
-                <Alert status="info" size="sm">
-                  <AlertIcon />
-                  <Text fontSize="sm">
-                    <strong>Safe to run:</strong> The migration only affects Firestore collections, not your Firebase Storage images.
-                  </Text>
-                </Alert>
-                
-                <Text fontWeight="bold" mt={4}>Required Firebase Storage Structure:</Text>
-                <OrderedList spacing={2} fontSize="sm">
-                  <ListItem>Folder: <Code>set1/</Code> with images 1.png through 1200.png</ListItem>
-                  <ListItem>Folder: <Code>set2/</Code> with images 1201.png through 2400.png</ListItem>
-                </OrderedList>
+              <VStack spacing={6}>
+                <SimpleGrid columns={{ base: 1, md: 2 }} spacing={6} w="full">
+                  {/* Basic Configuration */}
+                  <VStack spacing={4} align="stretch">
+                    <FormControl>
+                      <FormLabel>Number of Users</FormLabel>
+                      <NumberInput
+                        value={setupConfig.numberOfUsers}
+                        onChange={(value) => setSetupConfig(prev => ({ ...prev, numberOfUsers: parseInt(value) || 1080 }))}
+                        min={1}
+                        max={5000}
+                      >
+                        <NumberInputField />
+                        <NumberInputStepper>
+                          <NumberIncrementStepper />
+                          <NumberDecrementStepper />
+                        </NumberInputStepper>
+                      </NumberInput>
+                      <FormHelperText>Recommended: 1080 for large-scale studies</FormHelperText>
+                    </FormControl>
+
+                    <FormControl>
+                      <FormLabel>Images per User</FormLabel>
+                      <NumberInput
+                        value={setupConfig.imagesPerUser}
+                        onChange={(value) => setSetupConfig(prev => ({ ...prev, imagesPerUser: parseInt(value) || 10 }))}
+                        min={1}
+                        max={50}
+                      >
+                        <NumberInputField />
+                        <NumberInputStepper>
+                          <NumberIncrementStepper />
+                          <NumberDecrementStepper />
+                        </NumberInputStepper>
+                      </NumberInput>
+                      <FormHelperText>How many images each user will evaluate</FormHelperText>
+                    </FormControl>
+
+                    <FormControl>
+                      <FormLabel>Batch Size</FormLabel>
+                      <NumberInput
+                        value={setupConfig.batchSize}
+                        onChange={(value) => setSetupConfig(prev => ({ ...prev, batchSize: parseInt(value) || 50 }))}
+                        min={10}
+                        max={100}
+                      >
+                        <NumberInputField />
+                        <NumberInputStepper>
+                          <NumberIncrementStepper />
+                          <NumberDecrementStepper />
+                        </NumberInputStepper>
+                      </NumberInput>
+                      <FormHelperText>Users processed per batch (prevents timeouts)</FormHelperText>
+                    </FormControl>
+                  </VStack>
+
+                  {/* Advanced Configuration */}
+                  <VStack spacing={4} align="stretch">
+                    <FormControl>
+                      <FormLabel>Set Distribution</FormLabel>
+                      <Select
+                        value={setupConfig.setDistribution}
+                        onChange={(e) => setSetupConfig(prev => ({ ...prev, setDistribution: e.target.value }))}
+                      >
+                        <option value="balanced">Balanced (Both Sets)</option>
+                        <option value="set1_only">Set 1 Only</option>
+                        <option value="set2_only">Set 2 Only</option>
+                      </Select>
+                      <FormHelperText>Which image sets to include</FormHelperText>
+                    </FormControl>
+
+                    <FormControl display="flex" alignItems="center">
+                      <FormLabel mb="0">Random Assignment</FormLabel>
+                      <Switch
+                        isChecked={setupConfig.useRandomAssignment}
+                        onChange={(e) => setSetupConfig(prev => ({ ...prev, useRandomAssignment: e.target.checked }))}
+                      />
+                      <FormHelperText ml={3}>
+                        {setupConfig.useRandomAssignment ? 'Random' : 'Systematic'} image assignment
+                      </FormHelperText>
+                    </FormControl>
+
+                    <FormControl display="flex" alignItems="center">
+                      <FormLabel mb="0">Test Mode</FormLabel>
+                      <Switch
+                        isChecked={setupConfig.testMode}
+                        onChange={(e) => setSetupConfig(prev => ({ ...prev, testMode: e.target.checked }))}
+                      />
+                      <FormHelperText ml={3}>
+                        Mark generated users as test users
+                      </FormHelperText>
+                    </FormControl>
+                  </VStack>
+                </SimpleGrid>
+
+                <Divider />
+
+                {/* Generation Summary */}
+                <Card w="full" bg="blue.50">
+                  <CardBody>
+                    <VStack spacing={2}>
+                      <Text fontWeight="bold">Generation Summary</Text>
+                      <Text fontSize="sm">
+                        Will create <strong>{setupConfig.numberOfUsers} users</strong>, each assigned <strong>{setupConfig.imagesPerUser} images</strong>
+                      </Text>
+                      <Text fontSize="sm">
+                        Processing in batches of <strong>{setupConfig.batchSize}</strong> users 
+                        ({Math.ceil(setupConfig.numberOfUsers / setupConfig.batchSize)} total batches)
+                      </Text>
+                      <Text fontSize="sm">
+                        Assignment: <strong>{setupConfig.useRandomAssignment ? 'Random' : 'Systematic'}</strong> | 
+                        Distribution: <strong>{setupConfig.setDistribution}</strong>
+                      </Text>
+                    </VStack>
+                  </CardBody>
+                </Card>
+
+                {/* Action Buttons */}
+                <HStack spacing={4} w="full" justify="center">
+                  <Button
+                    colorScheme="blue"
+                    size="lg"
+                    onClick={generateUsers}
+                    isLoading={isGeneratingUsers}
+                    loadingText={`Generating... ${setupProgress}%`}
+                    isDisabled={!systemStatus || systemStatus.images.total === 0}
+                  >
+                    🚀 Generate {setupConfig.numberOfUsers} Users
+                  </Button>
+                  
+                  <Button
+                    colorScheme="red"
+                    variant="outline"
+                    size="lg"
+                    onClick={clearAllUsers}
+                    isDisabled={isGeneratingUsers || loading}
+                  >
+                    🗑️ Clear All Users
+                  </Button>
+                </HStack>
+
+                {/* Progress Bar */}
+                {isGeneratingUsers && (
+                  <VStack spacing={2} w="full">
+                    <Progress value={setupProgress} size="lg" colorScheme="blue" w="full" />
+                    <Text fontSize="sm" color="blue.600">
+                      {setupProgress}% Complete - Processing users in batches...
+                    </Text>
+                  </VStack>
+                )}
               </VStack>
             </CardBody>
           </Card>
 
-          {/* Navigation */}
-          <HStack spacing={4}>
-            <Button
-              leftIcon={<Shield />}
-              colorScheme="green"
-              onClick={() => navigate('/admin')}
-              variant="outline"
-            >
-              Back to Admin Dashboard
-            </Button>
-            
-            {isSystemInitialized && hasCorrectLoginCount && (
-              <Button
-                leftIcon={<Play />}
-                colorScheme="blue"
-                onClick={() => navigate('/admin')}
-              >
-                Go to Participant Management
-              </Button>
-            )}
-          </HStack>
+          {/* Setup Logs */}
+          {setupLogs.length > 0 && (
+            <Card w="full">
+              <CardHeader>
+                <HStack justify="space-between">
+                  <Heading size="md">Setup Logs</Heading>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setSetupLogs([])}
+                  >
+                    Clear Logs
+                  </Button>
+                </HStack>
+              </CardHeader>
+              <CardBody>
+                <Box
+                  maxH="300px"
+                  overflowY="auto"
+                  border="1px"
+                  borderColor="gray.200"
+                  borderRadius="md"
+                  p={3}
+                  bg="gray.50"
+                >
+                  <VStack spacing={1} align="stretch">
+                    {setupLogs.map((log) => (
+                      <HStack key={log.id} spacing={2} fontSize="sm">
+                        <Text color="gray.500" minW="16">{log.timestamp}</Text>
+                        <Badge
+                          colorScheme={
+                            log.type === 'error' ? 'red' :
+                            log.type === 'success' ? 'green' : 'blue'
+                          }
+                          size="sm"
+                        >
+                          {log.type}
+                        </Badge>
+                        <Text>{log.message}</Text>
+                      </HStack>
+                    ))}
+                  </VStack>
+                </Box>
+              </CardBody>
+            </Card>
+          )}
         </VStack>
       </Container>
-
-      {/* Migration Progress Modal */}
-      <Modal isOpen={isMigrationModalOpen} onClose={onMigrationModalClose} closeOnOverlayClick={false} size="lg">
-        <ModalOverlay />
-        <ModalContent>
-          <ModalHeader>System Migration Progress</ModalHeader>
-          {!migrationResults && <ModalCloseButton />}
-          <ModalBody pb={6}>
-            <VStack spacing={4}>
-              <Box w="full">
-                <HStack justify="space-between" mb={2}>
-                  <Text fontWeight="medium">Migration Progress</Text>
-                  <Text fontSize="sm" color="gray.600">{Math.round(migrationProgress)}%</Text>
-                </HStack>
-                <Progress value={migrationProgress} size="lg" colorScheme="blue" />
-              </Box>
-              
-              <Text fontSize="sm" color="gray.600" textAlign="center">
-                {migrationStatus}
-              </Text>
-              
-              {loading && (
-                <HStack>
-                  <Spinner size="sm" />
-                  <Text fontSize="sm">Please wait, this may take several minutes...</Text>
-                </HStack>
-              )}
-              
-              {migrationResults && (
-                <Box w="full">
-                  {migrationResults.success ? (
-                    <Alert status="success">
-                      <AlertIcon />
-                      <Box>
-                        <AlertTitle>Migration Successful!</AlertTitle>
-                        <AlertDescription>
-                          <VStack spacing={2} align="start" mt={2}>
-                            <Text fontSize="sm">
-                              • Created {migrationResults.createResults.totalCreated} login IDs
-                            </Text>
-                            <Text fontSize="sm">
-                              • Deleted {migrationResults.clearResults.totalDeleted} old documents
-                            </Text>
-                            <Text fontSize="sm">
-                              • Duration: {migrationResults.duration.toFixed(1)} seconds
-                            </Text>
-                            {migrationResults.createResults.errors > 0 && (
-                              <Text fontSize="sm" color="orange.600">
-                                • {migrationResults.createResults.errors} creation errors (check console)
-                              </Text>
-                            )}
-                          </VStack>
-                        </AlertDescription>
-                      </Box>
-                    </Alert>
-                  ) : (
-                    <Alert status="error">
-                      <AlertIcon />
-                      <Box>
-                        <AlertTitle>Migration Failed</AlertTitle>
-                        <AlertDescription>{migrationResults.error}</AlertDescription>
-                      </Box>
-                    </Alert>
-                  )}
-                </Box>
-              )}
-            </VStack>
-          </ModalBody>
-          <ModalFooter>
-            <Button 
-              onClick={onMigrationModalClose} 
-              isDisabled={loading}
-              colorScheme={migrationResults?.success ? "green" : "blue"}
-            >
-              {migrationResults?.success ? "Complete" : "Close"}
-            </Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
     </Box>
   );
 };
