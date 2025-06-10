@@ -1,12 +1,11 @@
-// src/pages/Login.js - Fixed for pre-assigned login system
+// src/pages/Login.js - Updated with Automatic Image Assignment for Auto-Generated Users
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
-import { db, auth } from '../firebase/config';
+import { ref, getDownloadURL } from 'firebase/storage';
+import { db, auth, storage } from '../firebase/config';
 import { signInAnonymously } from 'firebase/auth';
 import { checkSurveyCompletion } from '../utils/assessment-tracking';
-// Remove the deprecated import
-// import { assignImagesToUser } from '../utils/firebaseSetup';
 import {
   Box,
   Button,
@@ -50,6 +49,7 @@ const Login = () => {
   const [testMode, setTestMode] = useState(false);
   const [prolificData, setProlificData] = useState(null);
   const [isValidating, setIsValidating] = useState(false);
+  const [autoLoginInProgress, setAutoLoginInProgress] = useState(false);
   const { isOpen, onOpen, onClose } = useDisclosure();
   const navigate = useNavigate();
   const toast = useToast();
@@ -61,73 +61,304 @@ const Login = () => {
   console.log('Project ID from env:', process.env.REACT_APP_FIREBASE_PROJECT_ID);
 
   useEffect(() => {
-    // Check for Prolific parameters in URL
-    const prolificPid = searchParams.get('PROLIFIC_PID');
-    const studyId = searchParams.get('STUDY_ID');
-    const sessionId = searchParams.get('SESSION_ID');
-    
-    console.log('Login: URL Parameters detected:', { prolificPid, studyId, sessionId });
-    
-    if (prolificPid) {
-      // Check if this is a test user
-      if (prolificPid === 'TEST_USER' || prolificPid.startsWith('TEST_')) {
-        console.log('Login: Test user detected:', prolificPid);
-        setTestMode(true);
-        setLoginId(prolificPid);
-        setProlificData({
-          prolificPid,
-          studyId: studyId || 'TEST_STUDY',
-          sessionId: sessionId || 'TEST_SESSION',
-          detectedAt: new Date().toISOString(),
-          referrer: 'test',
-          userAgent: navigator.userAgent.substring(0, 200)
+    handleProlificEntry();
+  }, []);
+
+  // NEW: Get available images for assignment (similar to AdminDashboard)
+  const getAvailableImagesForAssignment = async () => {
+    try {
+      console.log('Login: Checking available images in Firebase Storage...');
+      
+      // Test sample images to verify storage structure
+      const testImages = [
+        { path: 'set1/1.png', set: 'set1' },
+        { path: 'set1/100.png', set: 'set1' },
+        { path: 'set2/1201.png', set: 'set2' },
+        { path: 'set2/1300.png', set: 'set2' }
+      ];
+      
+      let set1Exists = false;
+      let set2Exists = false;
+      
+      for (const testImg of testImages) {
+        try {
+          const imageRef = ref(storage, testImg.path);
+          await getDownloadURL(imageRef);
+          if (testImg.set === 'set1') {
+            set1Exists = true;
+          } else {
+            set2Exists = true;
+          }
+          console.log(`Login: ✓ Found ${testImg.path}`);
+        } catch (error) {
+          console.warn(`Login: ✗ Test image ${testImg.path} not found`);
+        }
+      }
+      
+      if (!set1Exists && !set2Exists) {
+        throw new Error('No image sets found in Firebase Storage. Please upload images first.');
+      }
+      
+      const availableImages = [];
+      
+      // Generate image objects for verified sets
+      if (set1Exists) {
+        console.log('Login: Adding set1 images (1-1200)...');
+        for (let i = 1; i <= 1200; i++) {
+          availableImages.push({
+            id: `set1_${i}`,
+            name: `${i}.png`,
+            set: 'set1',
+            path: `set1/${i}.png`,
+            storageRef: `set1/${i}.png`
+          });
+        }
+      }
+      
+      if (set2Exists) {
+        console.log('Login: Adding set2 images (1201-2400)...');
+        for (let i = 1201; i <= 2400; i++) {
+          availableImages.push({
+            id: `set2_${i}`,
+            name: `${i}.png`,
+            set: 'set2',
+            path: `set2/${i}.png`,
+            storageRef: `set2/${i}.png`
+          });
+        }
+      }
+      
+      // Shuffle for random assignment
+      const shuffled = availableImages.sort(() => Math.random() - 0.5);
+      
+      console.log(`Login: ✓ Generated ${shuffled.length} available images for assignment`);
+      
+      return shuffled;
+      
+    } catch (error) {
+      console.error('Login: Error getting available images:', error);
+      throw error;
+    }
+  };
+
+  // NEW: Assign images to a user
+  const assignImagesToUser = async (availableImages, imagesPerUser = 10) => {
+    try {
+      const set1Images = availableImages.filter(img => img.set === 'set1');
+      const set2Images = availableImages.filter(img => img.set === 'set2');
+      
+      const assignedImages = [];
+      
+      if (set1Images.length > 0 && set2Images.length > 0) {
+        // Both sets available - assign balanced (5 from each)
+        const imagesPerSet = Math.floor(imagesPerUser / 2);
+        
+        // Get random starting points
+        const set1StartIndex = Math.floor(Math.random() * Math.max(1, set1Images.length - imagesPerSet));
+        const set2StartIndex = Math.floor(Math.random() * Math.max(1, set2Images.length - imagesPerSet));
+        
+        // Add images from set1
+        for (let j = 0; j < imagesPerSet && j + set1StartIndex < set1Images.length; j++) {
+          assignedImages.push(set1Images[set1StartIndex + j]);
+        }
+        
+        // Add images from set2
+        for (let j = 0; j < imagesPerSet && j + set2StartIndex < set2Images.length; j++) {
+          assignedImages.push(set2Images[set2StartIndex + j]);
+        }
+        
+        // If we need one more image (odd number), pick randomly
+        if (assignedImages.length < imagesPerUser) {
+          const remainingSet = Math.random() < 0.5 ? set1Images : set2Images;
+          const usedIds = new Set(assignedImages.map(img => img.id));
+          const unusedImage = remainingSet.find(img => !usedIds.has(img.id));
+          if (unusedImage) {
+            assignedImages.push(unusedImage);
+          }
+        }
+      } else {
+        // Only one set available - assign from available set
+        const availableSet = set1Images.length > 0 ? set1Images : set2Images;
+        const startIndex = Math.floor(Math.random() * Math.max(1, availableSet.length - imagesPerUser));
+        
+        for (let j = 0; j < imagesPerUser && j + startIndex < availableSet.length; j++) {
+          assignedImages.push(availableSet[startIndex + j]);
+        }
+      }
+      
+      console.log(`Login: Assigned ${assignedImages.length} images:`);
+      console.log(`  - Set1: ${assignedImages.filter(img => img.set === 'set1').length} images`);
+      console.log(`  - Set2: ${assignedImages.filter(img => img.set === 'set2').length} images`);
+      
+      return assignedImages;
+      
+    } catch (error) {
+      console.error('Login: Error assigning images:', error);
+      throw error;
+    }
+  };
+
+  const handleProlificEntry = async () => {
+    try {
+      // Check for Prolific parameters in URL
+      const prolificPid = searchParams.get('PROLIFIC_PID');
+      const studyId = searchParams.get('STUDY_ID');
+      const sessionId = searchParams.get('SESSION_ID');
+      
+      console.log('Login: URL Parameters detected:', { prolificPid, studyId, sessionId });
+      
+      if (prolificPid) {
+        // Determine if this is test mode
+        const isTestUser = prolificPid === 'TEST_USER' || prolificPid.startsWith('TEST_');
+        const finalProlificPid = prolificPid;
+        
+        console.log('Login: Prolific participant detected:', { 
+          prolificPid: finalProlificPid, 
+          studyId, 
+          sessionId, 
+          isTestUser 
         });
-        return;
+        
+        // Validate Prolific ID format (24 character hex string) unless it's a test
+        if (!isTestUser && !/^[a-f0-9]{24}$/i.test(prolificPid)) {
+          console.warn('Login: Invalid Prolific ID format:', prolificPid);
+          setError(`Invalid Prolific ID format: ${prolificPid}. Please access this study through the official Prolific link.`);
+          return;
+        }
+        
+        const prolificInfo = {
+          prolificPid: finalProlificPid,
+          studyId: studyId || 'unknown',
+          sessionId: sessionId || 'unknown',
+          detectedAt: new Date().toISOString(),
+          referrer: document.referrer || 'direct',
+          userAgent: navigator.userAgent.substring(0, 200),
+          isTestUser
+        };
+        
+        setProlificData(prolificInfo);
+        setProlificMode(true);
+        setTestMode(isTestUser);
+        
+        // Store Prolific data in sessionStorage immediately
+        sessionStorage.setItem('prolificPid', finalProlificPid);
+        sessionStorage.setItem('studyId', studyId || 'unknown');
+        sessionStorage.setItem('sessionId', sessionId || 'unknown');
+        sessionStorage.setItem('testMode', isTestUser.toString());
+        
+        console.log('Login: Prolific mode activated, proceeding with auto-login');
+        
+        // Proceed with automatic login for Prolific users
+        await handleAutomaticProlificLogin(prolificInfo);
+        
+      } else {
+        // No Prolific parameters found - allow manual entry for testing/admin
+        console.log('Login: No Prolific parameters detected - allowing manual entry');
+        setError('');
+        
+        // Check existing session for manual users
+        const existingLoginId = sessionStorage.getItem('userLoginId');
+        const isAdmin = sessionStorage.getItem('isAdmin');
+        
+        if (existingLoginId && isAdmin === 'true') {
+          console.log('Login: Existing admin session found, redirecting to admin dashboard');
+          navigate('/admin');
+        } else if (existingLoginId) {
+          console.log('Login: Existing user session found, checking status');
+          checkExistingUser(existingLoginId);
+        }
       }
+    } catch (error) {
+      console.error('Login: Error handling Prolific entry:', error);
+      setError('Error processing your entry. Please refresh and try again.');
+    }
+  };
 
-      console.log('Login: Prolific participant detected:', { prolificPid, studyId, sessionId });
+  const handleAutomaticProlificLogin = async (prolificInfo) => {
+    try {
+      setAutoLoginInProgress(true);
+      setLoading(true);
       
-      // Validate Prolific ID format (24 character hex string)
-      if (!/^[a-f0-9]{24}$/i.test(prolificPid)) {
-        console.warn('Login: Invalid Prolific ID format:', prolificPid);
-        setError(`Invalid Prolific ID format: ${prolificPid}. Please access this study through the official Prolific link.`);
-        return;
+      // Generate automatic login ID
+      const loginId = `login_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      console.log('Login: Auto-generating login ID for Prolific user:', {
+        prolificPid: prolificInfo.prolificPid,
+        loginId,
+        isTestUser: prolificInfo.isTestUser
+      });
+      
+      // Check if this Prolific user has already participated (only for real users, not test)
+      if (!prolificInfo.isTestUser) {
+        const existingParticipant = await checkExistingProlificParticipant(prolificInfo.prolificPid);
+        if (existingParticipant) {
+          setError(`You have already participated in this study. Prolific ID: ${prolificInfo.prolificPid.substring(0, 8)}...`);
+          setLoading(false);
+          setAutoLoginInProgress(false);
+          return;
+        }
       }
       
-      const prolificInfo = {
-        prolificPid,
-        studyId,
-        sessionId,
-        detectedAt: new Date().toISOString(),
-        referrer: document.referrer || 'direct',
-        userAgent: navigator.userAgent.substring(0, 200)
-      };
+      // UPDATED: Create user record with automatic image assignment
+      const result = await createOrUpdateUserRecord(loginId, prolificInfo, prolificInfo.isTestUser);
       
-      setProlificData(prolificInfo);
-      setLoginId(prolificPid);
-      setProlificMode(true);
+      // Store session data
+      sessionStorage.setItem('userLoginId', loginId);
+      sessionStorage.setItem('prolificPid', prolificInfo.prolificPid);
+      sessionStorage.setItem('displayId', prolificInfo.prolificPid);
+      if (prolificInfo.isTestUser) {
+        sessionStorage.setItem('testMode', 'true');
+      }
       
-      console.log('Login: Prolific mode activated with data:', prolificInfo);
-    } else {
-      // No Prolific parameters found - allow manual entry for testing
-      console.log('Login: No Prolific parameters detected in URL - allowing manual entry');
-      setError('');
+      // Sign in anonymously for Firebase auth
+      const userCredential = await signInAnonymously(auth);
+      console.log('Login: Anonymous auth successful:', userCredential.user.uid);
+      
+      // Check completion status and navigate
+      const isCompleted = await checkSurveyCompletion(loginId);
+      
+      if (isCompleted) {
+        console.log('Login: User has completed study, redirecting to completion page');
+        navigate('/completion');
+      } else if (result.userData.hasConsented) {
+        console.log('Login: User has consented, redirecting to survey');
+        navigate('/survey');
+      } else {
+        console.log('Login: User needs to provide consent, redirecting to consent page');
+        navigate('/consent');
+      }
+      
+      toast({
+        title: 'Welcome!',
+        description: prolificInfo.isTestUser ? 'Test session loaded successfully' : 'Prolific study session loaded successfully',
+        status: 'success',
+        duration: 2000,
+      });
+      
+    } catch (error) {
+      console.error('Login: Automatic Prolific login error:', error);
+      setError(`Failed to process your Prolific entry: ${error.message}`);
+    } finally {
+      setLoading(false);
+      setAutoLoginInProgress(false);
     }
+  };
 
-    // Check existing session - but allow fresh start from login page
-    const existingLoginId = sessionStorage.getItem('userLoginId');
-    const isAdmin = sessionStorage.getItem('isAdmin');
-    
-    // Only auto-redirect if user has session AND they haven't manually come to login page
-    if (existingLoginId && isAdmin === 'true' && !window.location.pathname.includes('/login')) {
-      console.log('Login: Existing admin session found, redirecting to admin dashboard');
-      navigate('/admin');
-    } else if (existingLoginId && (prolificPid || testMode) && !window.location.pathname.includes('/login')) {
-      // User has existing session and came through Prolific or test - check if valid
-      console.log('Login: Existing user session found, checking status');
-      checkExistingUser(existingLoginId);
+  const checkExistingProlificParticipant = async (prolificPid) => {
+    try {
+      // This is a simplified check - you might want to implement a more sophisticated
+      // duplicate detection system based on your needs
+      console.log('Login: Checking for existing Prolific participant:', prolificPid);
+      
+      // For now, we'll allow participation - you can enhance this with a dedicated
+      // prolificParticipants collection if needed
+      return null;
+      
+    } catch (error) {
+      console.error('Login: Error checking existing Prolific participant:', error);
+      return null; // If error, allow them to proceed
     }
-  }, [navigate, searchParams]);
+  };
 
   const checkExistingUser = async (userId) => {
     try {
@@ -174,7 +405,7 @@ const Login = () => {
     }
   };
 
-  // SIMPLIFIED USER CREATION - For pre-assigned system, we just need to create minimal user record
+  // UPDATED: Create or update user record with automatic image assignment
   const createOrUpdateUserRecord = async (userId, prolificData = null, isTest = false) => {
     try {
       console.log('Login: Creating/updating user record for ID:', userId, { isTest });
@@ -198,16 +429,31 @@ const Login = () => {
         
         return { success: true, userId, userData: existingData };
       } else {
-        console.log('Login: Creating new user record (assuming pre-assigned images exist)');
+        console.log('Login: Creating new user record with automatic image assignment');
         
-        // Create basic user document - assuming images are pre-assigned
+        // NEW: Get available images and assign them
+        let assignedImages = [];
+        try {
+          const availableImages = await getAvailableImagesForAssignment();
+          assignedImages = await assignImagesToUser(availableImages, 10); // Assign 10 images
+          console.log(`Login: Successfully assigned ${assignedImages.length} images to new user`);
+        } catch (imageError) {
+          console.error('Login: Error assigning images:', imageError);
+          // Continue without images - will show 0 images assigned
+          assignedImages = [];
+        }
+        
+        // Create user document with assigned images
         const userData = {
           internalUserId: userId,
           displayId: userId,
-          // Note: assignedImages should be pre-assigned by admin
+          assignedImages: assignedImages, // NEW: Include assigned images
           completedImages: 0,
+          completedImageIds: [],
+          totalImages: assignedImages.length, // NEW: Set total images
           surveyCompleted: false,
           hasConsented: false,
+          demographicsCompleted: false,
           createdAt: serverTimestamp(),
           lastLogin: serverTimestamp(),
           isActive: true,
@@ -216,6 +462,16 @@ const Login = () => {
           ipInfo: {
             timestamp: new Date().toISOString(),
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+          },
+          // NEW: Image assignment details
+          imageAssignmentStatus: assignedImages.length > 0 ? 'assigned' : 'failed',
+          autoAssignedAt: serverTimestamp(),
+          autoAssignmentDetails: {
+            imagesAssigned: assignedImages.length,
+            set1Count: assignedImages.filter(img => img.set === 'set1').length,
+            set2Count: assignedImages.filter(img => img.set === 'set2').length,
+            assignedDuringLogin: true,
+            assignmentTimestamp: new Date().toISOString()
           }
         };
         
@@ -233,11 +489,14 @@ const Login = () => {
             source: isTest ? 'test_redirect' : 'prolific_redirect',
             isTestUser: isTest
           };
+          
+          // Store the Prolific PID at the top level for easy access
+          userData.prolificPid = prolificData.prolificPid;
         }
         
         await setDoc(userRef, userData);
         
-        console.log(`Login: User ${userId} record created successfully`);
+        console.log(`Login: User ${userId} record created successfully with ${assignedImages.length} assigned images`);
         
         return { success: true, userId, userData };
       }
@@ -247,7 +506,7 @@ const Login = () => {
     }
   };
 
-  const handleLogin = async (e) => {
+  const handleManualLogin = async (e) => {
     e.preventDefault();
     setError('');
   
@@ -287,85 +546,135 @@ const Login = () => {
       }
     }
 
-    // Handle all other login types (direct IDs, test users, Prolific users)
-    try {
-      setLoading(true);
-      console.log('Login: Processing login for:', userId);
-      
-      // Determine user type
-      const isTestUser = userId === 'TEST' || userId.startsWith('TEST_') || testMode;
-      const isProlificUser = prolificMode && !isTestUser;
-      
-      let finalUserId = userId;
-      let userProlificData = prolificData;
-      
-      // Handle test users
-      if (isTestUser) {
-        finalUserId = userId === 'TEST' ? 'TEST_USER' : userId;
-        userProlificData = {
+    // Handle test users
+    if (userId === 'TEST' || userId.startsWith('TEST_')) {
+      try {
+        setLoading(true);
+        console.log('Login: Processing test user login:', userId);
+        
+        const finalUserId = userId === 'TEST' ? 'TEST_USER' : userId;
+        const testProlificData = {
           prolificPid: finalUserId,
           studyId: 'TEST_STUDY',
           sessionId: 'TEST_SESSION',
           detectedAt: new Date().toISOString(),
           referrer: 'test',
-          userAgent: navigator.userAgent.substring(0, 200)
+          userAgent: navigator.userAgent.substring(0, 200),
+          isTestUser: true
         };
-      }
-      
-      // Create or update user record (no image assignment here)
-      const result = await createOrUpdateUserRecord(finalUserId, userProlificData, isTestUser);
-      const userData = result.userData;
-      
-      // Store session data
-      sessionStorage.setItem('userLoginId', finalUserId);
-      if (userProlificData) {
-        sessionStorage.setItem('prolificPid', userProlificData.prolificPid);
-        sessionStorage.setItem('displayId', userProlificData.prolificPid);
-      }
-      if (isTestUser) {
+        
+        // Store test session data
+        sessionStorage.setItem('prolificPid', finalUserId);
+        sessionStorage.setItem('studyId', 'TEST_STUDY');
+        sessionStorage.setItem('sessionId', 'TEST_SESSION');
         sessionStorage.setItem('testMode', 'true');
+        
+        // Generate login ID for test user
+        const loginIdForTest = `login_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        
+        // Create user record with automatic image assignment
+        const result = await createOrUpdateUserRecord(loginIdForTest, testProlificData, true);
+        
+        // Store session data
+        sessionStorage.setItem('userLoginId', loginIdForTest);
+        
+        // Sign in anonymously
+        await signInAnonymously(auth);
+        
+        // Navigate based on status
+        const isCompleted = await checkSurveyCompletion(loginIdForTest);
+        
+        if (isCompleted) {
+          navigate('/completion');
+        } else if (result.userData.hasConsented) {
+          navigate('/survey');
+        } else {
+          navigate('/consent');
+        }
+        
+        toast({
+          title: 'Test Session Loaded',
+          description: `Welcome to the test environment! ${result.userData.totalImages} images assigned.`,
+          status: 'success',
+          duration: 2000,
+        });
+        
+        return;
+      } catch (error) {
+        console.error('Login: Test user login error:', error);
+        setError('Test login failed. Please try again.');
+        return;
+      } finally {
+        setLoading(false);
       }
+    }
+
+    // Handle direct participant ID entry (for pre-assigned users)
+    try {
+      setLoading(true);
+      console.log('Login: Processing direct login for:', userId);
       
-      // Sign in anonymously for Firebase auth
-      const userCredential = await signInAnonymously(auth);
-      console.log('Login: Anonymous auth successful:', userCredential.user.uid);
+      // Check if this is a pre-assigned user ID
+      const userRef = doc(db, 'loginIDs', userId);
+      const userDoc = await getDoc(userRef);
       
-      // Check completion status and navigate
-      const isCompleted = await checkSurveyCompletion(finalUserId);
-      
-      if (isCompleted) {
-        console.log('Login: User has completed study, redirecting to completion page');
-        navigate('/completion');
-      } else if (userData.hasConsented) {
-        console.log('Login: User has consented, redirecting to survey');
-        navigate('/survey');
+      if (userDoc.exists()) {
+        // User exists - use existing record
+        const userData = userDoc.data();
+        sessionStorage.setItem('userLoginId', userId);
+        
+        // Sign in anonymously
+        await signInAnonymously(auth);
+        
+        // Navigate based on status
+        const isCompleted = await checkSurveyCompletion(userId);
+        
+        if (isCompleted) {
+          navigate('/completion');
+        } else if (userData.hasConsented) {
+          navigate('/survey');
+        } else {
+          navigate('/consent');
+        }
+        
+        toast({
+          title: 'Login Successful',
+          description: 'Welcome back to the study!',
+          status: 'success',
+          duration: 2000,
+        });
       } else {
-        console.log('Login: User needs to provide consent, redirecting to consent page');
+        // User doesn't exist - this might be a new direct user, create with images
+        const directLoginId = `login_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        
+        // Create user record with automatic image assignment
+        const result = await createOrUpdateUserRecord(directLoginId, null, false);
+        
+        // Store session data
+        sessionStorage.setItem('userLoginId', directLoginId);
+        
+        // Sign in anonymously
+        await signInAnonymously(auth);
+        
+        // Navigate to consent
         navigate('/consent');
+        
+        toast({
+          title: 'Login Successful',
+          description: `Welcome to the study! ${result.userData.totalImages} images assigned.`,
+          status: 'success',
+          duration: 2000,
+        });
       }
-      
-      toast({
-        title: 'Login Successful',
-        description: isTestUser ? 'Test session loaded' : 'Welcome to the study!',
-        status: 'success',
-        duration: 2000,
-      });
       
     } catch (error) {
-      console.error('Login: Login error:', error);
-      
-      // Check if this is a "user not pre-assigned" error
-      if (error.message && error.message.includes('pre-assigned')) {
-        setError(`Participant ID "${userId}" has not been pre-assigned. Please contact the administrator or use a valid participant ID.`);
-      } else {
-        setError(error.message || 'Failed to log in. Please try again.');
-      }
+      console.error('Login: Direct login error:', error);
+      setError(error.message || 'Failed to log in. Please try again.');
     } finally {
       setLoading(false);
     }
   };
 
-  // Rest of the component remains the same...
   const renderTutorialStep = () => {
     switch (tutorialStep) {
       case 1:
@@ -500,8 +809,10 @@ const Login = () => {
               </Box>
             )}
             <Text fontSize="sm" color="gray.600" fontStyle="italic">
-              Click "Start Study" below to begin your evaluation, or use the "Previous" button 
-              to review any information above.
+              {prolificMode 
+                ? 'The study will begin automatically, or use the "Start Study" button below.'
+                : 'Click "Start Study" below to begin your evaluation, or use the "Previous" button to review any information above.'
+              }
             </Text>
           </VStack>
         );
@@ -511,13 +822,23 @@ const Login = () => {
     }
   };
 
-  // Show validation spinner if checking existing user
-  if (isValidating) {
+  // Show validation spinner if checking existing user or auto-login in progress
+  if (isValidating || autoLoginInProgress) {
     return (
       <Flex minH="100vh" align="center" justify="center" bg="gray.50">
         <VStack spacing={4}>
           <Spinner size="xl" color="blue.500" />
-          <Text>Validating your session...</Text>
+          <Text>
+            {autoLoginInProgress 
+              ? 'Setting up your Prolific study session...' 
+              : 'Validating your session...'
+            }
+          </Text>
+          {prolificData && (
+            <Text fontSize="sm" color="gray.600">
+              Participant ID: {prolificData.prolificPid?.substring(0, 8)}...
+            </Text>
+          )}
         </VStack>
       </Flex>
     );
@@ -564,9 +885,10 @@ const Login = () => {
             </VStack>
           </CardHeader>
           <CardBody>
-            <form onSubmit={handleLogin}>
-              <VStack spacing={6}>
-                {!prolificMode && !testMode && (
+            {/* Show form only for non-Prolific users or if there's an error */}
+            {(!prolificMode || error) && (
+              <form onSubmit={handleManualLogin}>
+                <VStack spacing={6}>
                   <Box w="full">
                     <Input
                       type="text"
@@ -584,117 +906,103 @@ const Login = () => {
                       size="lg"
                     />
                   </Box>
-                )}
 
-                {(prolificMode || testMode) && (
-                  <Box w="full">
-                    <Text mb={2} fontWeight="medium">
-                      {testMode ? 'Test User ID' : 'Prolific Participant ID'}
-                    </Text>
-                    <Input
-                      type="text"
-                      value={prolificData?.prolificPid || ''}
-                      textAlign="center"
-                      fontSize="sm"
-                      fontFamily="mono"
-                      isReadOnly={true}
-                      bg={testMode ? "orange.50" : "gray.50"}
-                      color={testMode ? "orange.700" : "gray.700"}
-                      border="2px solid"
-                      borderColor={testMode ? "orange.200" : "blue.200"}
-                    />
-                    <Text fontSize="xs" color="gray.500" mt={1} textAlign="center">
-                      {testMode 
-                        ? 'Test ID automatically detected or entered'
-                        : 'ID automatically detected from Prolific redirect'
-                      }
-                    </Text>
-                  </Box>
-                )}
+                  {error && (
+                    <Alert status="error" borderRadius="md">
+                      <AlertIcon />
+                      <Box>
+                        <Text fontSize="sm">{error}</Text>
+                      </Box>
+                    </Alert>
+                  )}
 
-                {error && (
-                  <Alert status="error" borderRadius="md">
-                    <AlertIcon />
-                    <Box>
-                      <Text fontSize="sm">{error}</Text>
-                    </Box>
-                  </Alert>
-                )}
-
-                <Button
-                  type="submit"
-                  colorScheme={
-                    loginId === 'ADMIN' ? "green" : 
-                    (loginId.startsWith('TEST') || testMode) ? "orange" : 
-                    "blue"
-                  }
-                  width="full"
-                  isLoading={loading}
-                  loadingText="Signing in..."
-                  size="lg"
-                >
-                  {loginId === 'ADMIN' ? 'Access Admin Dashboard' : 
-                   (loginId.startsWith('TEST') || testMode) ? 'Begin Test Session' :
-                   'Begin Study'}
-                </Button>
-
-                {(prolificMode || testMode) && (
                   <Button
-                    leftIcon={<Info />}
-                    colorScheme="teal"
-                    variant="outline"
-                    onClick={onOpen}
+                    type="submit"
+                    colorScheme={
+                      loginId === 'ADMIN' ? "green" : 
+                      loginId.startsWith('TEST') ? "orange" : 
+                      "blue"
+                    }
                     width="full"
+                    isLoading={loading}
+                    loadingText="Signing in..."
+                    size="lg"
                   >
-                    Study Information & Tutorial
+                    {loginId === 'ADMIN' ? 'Access Admin Dashboard' : 
+                     loginId.startsWith('TEST') ? 'Begin Test Session' :
+                     'Begin Study'}
                   </Button>
-                )}
 
-                {/* Instructions for direct entry */}
-                {!prolificMode && !testMode && (
+                  {/* Instructions for direct entry */}
                   <Box p={4} bg="gray.50" borderRadius="md" w="full">
                     <VStack spacing={2}>
                       <Text fontSize="sm" fontWeight="medium" color="gray.700">
-                        Pre-Assigned Participant System
+                        Automatic Image Assignment
                       </Text>
                       <Text fontSize="xs" color="gray.600" textAlign="center">
-                        Only use participant IDs that have been pre-assigned by the administrator.
-                        Contact support if you don't have a valid participant ID.
+                        ✓ New participants will automatically receive 10 random images (5 from each set)
+                      </Text>
+                      <Text fontSize="xs" color="gray.600" textAlign="center">
+                        ✓ Pre-assigned participant IDs will use their existing image assignments
                       </Text>
                     </VStack>
                   </Box>
-                )}
+                </VStack>
+              </form>
+            )}
 
-                {/* Study Status Information */}
-                {prolificMode && prolificData && !testMode && (
-                  <Box p={3} bg="green.50" borderRadius="md" w="full">
-                    <VStack spacing={1}>
-                      <Text fontSize="sm" fontWeight="medium" color="green.800">
-                        ✓ Study Link Validated
-                      </Text>
-                      <HStack fontSize="xs" color="green.600" spacing={4}>
-                        <Text>Study: {prolificData.studyId?.substring(0, 8) || 'N/A'}</Text>
-                        <Text>Session: {prolificData.sessionId?.substring(0, 8) || 'N/A'}</Text>
-                      </HStack>
-                    </VStack>
-                  </Box>
-                )}
+            {/* Show Prolific auto-login interface */}
+            {prolificMode && !error && (
+              <VStack spacing={6}>
+                <Box w="full">
+                  <Text mb={2} fontWeight="medium">
+                    {testMode ? 'Test User ID' : 'Prolific Participant ID'}
+                  </Text>
+                  <Input
+                    type="text"
+                    value={prolificData?.prolificPid || ''}
+                    textAlign="center"
+                    fontSize="sm"
+                    fontFamily="mono"
+                    isReadOnly={true}
+                    bg={testMode ? "orange.50" : "gray.50"}
+                    color={testMode ? "orange.700" : "gray.700"}
+                    border="2px solid"
+                    borderColor={testMode ? "orange.200" : "blue.200"}
+                  />
+                  <Text fontSize="xs" color="gray.500" mt={1} textAlign="center">
+                    {testMode 
+                      ? 'Test ID automatically detected - 10 images will be assigned'
+                      : 'ID automatically detected from Prolific redirect - 10 images will be assigned'
+                    }
+                  </Text>
+                </Box>
 
-                {/* Test Mode Information */}
-                {testMode && (
-                  <Box p={3} bg="orange.50" borderRadius="md" w="full">
-                    <VStack spacing={1}>
-                      <Text fontSize="sm" fontWeight="medium" color="orange.800">
-                        🧪 Test Mode Active
-                      </Text>
-                      <Text fontSize="xs" color="orange.600">
-                        This session will be marked as test data and can be easily identified in analytics
-                      </Text>
-                    </VStack>
-                  </Box>
-                )}
+                <Button
+                  leftIcon={<Info />}
+                  colorScheme="teal"
+                  variant="outline"
+                  onClick={onOpen}
+                  width="full"
+                >
+                  Study Information & Tutorial
+                </Button>
+
+                <Box p={3} bg="green.50" borderRadius="md" w="full">
+                  <VStack spacing={1}>
+                    <Text fontSize="sm" fontWeight="medium" color="green.800">
+                      ✓ {testMode ? 'Test Session Ready' : 'Study Link Validated'}
+                    </Text>
+                    <Text fontSize="xs" color="green.600">
+                      {testMode 
+                        ? 'Automatic login completed - 10 test images will be assigned'
+                        : 'Automatic login completed - 10 random images will be assigned'
+                      }
+                    </Text>
+                  </VStack>
+                </Box>
               </VStack>
-            </form>
+            )}
           </CardBody>
         </Card>
 
@@ -713,6 +1021,10 @@ const Login = () => {
                 <HStack justify="space-between" w="full" fontSize="xs" color="gray.600">
                   <Text>Images to Evaluate:</Text>
                   <Text fontWeight="medium">10 images (5 from each set)</Text>
+                </HStack>
+                <HStack justify="space-between" w="full" fontSize="xs" color="gray.600">
+                  <Text>Image Assignment:</Text>
+                  <Text fontWeight="medium">✓ Automatic random selection</Text>
                 </HStack>
                 <HStack justify="space-between" w="full" fontSize="xs" color="gray.600">
                   <Text>Compensation:</Text>

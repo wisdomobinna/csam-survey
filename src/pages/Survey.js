@@ -1,4 +1,4 @@
-// src/pages/Survey.js - Combined Demographics and Main Survey with auto-advance
+// src/pages/Survey.js - Combined Demographics and Main Survey with Prolific Integration
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
@@ -580,23 +580,45 @@ const Survey = () => {
     console.log('Manual next triggered');
   };
 
-  // Generate URLs for both demographics and main survey
+  // Generate URLs for both demographics and main survey with Prolific integration
   const generateQualtricsUrl = (isDemographics = false) => {
     if (isDemographics) {
+      // DEMOGRAPHICS SURVEY - Capture Prolific data here
       const baseUrl = 'https://georgetown.az1.qualtrics.com/jfe/form/SV_0lcUfUbcn7vo7qe';
       const userId = sessionStorage.getItem('userLoginId') || 'unknown';
+      const prolificPid = sessionStorage.getItem('prolificPid') || 'TEST_USER';
+      const studyId = sessionStorage.getItem('studyId') || 'unknown';
+      const sessionId = sessionStorage.getItem('sessionId') || 'unknown';
+      const isTestMode = sessionStorage.getItem('testMode') === 'true';
       
       const params = new URLSearchParams({
-        user_id: userId,
+        // PROLIFIC DATA - Only captured once here
+        PROLIFIC_PID: prolificPid,
+        STUDY_ID: studyId,
+        SESSION_ID: sessionId,
+        
+        // LINKING DATA
+        loginID: userId,
+        survey_type: 'demographics',
+        is_test_mode: isTestMode ? 'true' : 'false',
+        entry_timestamp: new Date().toISOString(),
+        
+        // CONTROL PARAMETERS
         embedded: 'true',
         source: 'react_app',
-        completion_redirect: 'false',
-        hide_images: 'true'
+        completion_redirect: 'false'
+      });
+      
+      console.log('Demographics: Capturing Prolific data:', {
+        PROLIFIC_PID: prolificPid,
+        loginID: userId,
+        survey_type: 'demographics'
       });
       
       return `${baseUrl}?${params.toString()}`;
+      
     } else {
-      // Main survey URL generation
+      // MAIN SURVEY - No Prolific data, just image data
       const currentImage = images[currentImageIndex];
       if (!currentImage) return '';
       
@@ -606,16 +628,48 @@ const Survey = () => {
         return '';
       }
       
+      const userId = sessionData.userId || 'unknown';
+      const isTestMode = sessionStorage.getItem('testMode') === 'true';
+      
+      // Extract image number
+      let imageNumber = '';
+      if (currentImage.number) {
+        imageNumber = currentImage.number.toString();
+      } else if (currentImage.name) {
+        const numberMatch = currentImage.name.match(/(\d+)/);
+        imageNumber = numberMatch ? numberMatch[1] : '';
+      } else if (currentImage.id) {
+        const numberMatch = currentImage.id.match(/(\d+)/);
+        imageNumber = numberMatch ? numberMatch[1] : '';
+      }
+      
       const params = new URLSearchParams({
-        user_id: sessionData.userId || 'unknown',
-        prolific_pid: sessionData.prolificPid || 'test',
-        image_id: currentImage.id || 'unknown',
-        image_name: currentImage.name || 'unknown',
-        image_set: currentImage.set || 'unknown',
-        image_index: currentImageIndex.toString(),
-        total_images: images.length.toString(),
-        is_test: sessionData.isTestMode ? 'true' : 'false',
+        // LINKING DATA - Connect back to demographics via loginID
+        loginID: userId,
+        
+        // IMAGE/EVALUATION DATA
+        ImageID: currentImage.id || 'unknown',
+        ImageNumber: imageNumber || 'unknown',
+        ImageName: currentImage.name || 'unknown',
+        ImageSet: currentImage.set || 'unknown',
+        ImageIndex: currentImageIndex.toString(),
+        TotalImages: images.length.toString(),
+        
+        // STUDY METADATA
+        survey_type: 'image_evaluation',
+        is_test_mode: isTestMode ? 'true' : 'false',
+        evaluation_timestamp: new Date().toISOString(),
+        
+        // TECHNICAL PARAMETERS
+        embedded: 'true',
+        source: 'react_app',
         preventAutoAdvance: 'true'
+      });
+      
+      console.log('Main Survey: Image evaluation data (no Prolific PID needed):', {
+        loginID: userId,
+        ImageID: currentImage.id,
+        ImageNumber: imageNumber
       });
       
       return `${baseUrl}?${params.toString()}`;
@@ -680,6 +734,9 @@ const Survey = () => {
               <HStack spacing={2}>
                 <Badge colorScheme="blue">Step 2 of 3</Badge>
                 <Badge colorScheme="gray">Consent → Demographics → Main Study</Badge>
+                {sessionData.isTestMode && (
+                  <Badge colorScheme="orange">Test Mode</Badge>
+                )}
               </HStack>
             </VStack>
           </Container>
