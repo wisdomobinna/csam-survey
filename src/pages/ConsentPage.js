@@ -220,11 +220,10 @@ const ConsentPage = () => {
               <Box>
                 <Heading size="md" mb={3}>Study Information</Heading>
                 <Text mb={2}>
-                  You are invited to participate in a research study on visual perception and evaluation.
-                  This study involves viewing and rating a series of images based on specific criteria.
+                  This study involves viewing and rating a series of images. We are interested in understanding your perceptions of these images.
                 </Text>
                 <Text>
-                  Your participation will help advance our understanding of how people perceive and evaluate visual content.
+                You will be paid at a rate of $15/hr for your participation.
                 </Text>
               </Box>
               
@@ -236,29 +235,21 @@ const ConsentPage = () => {
                 <OrderedList spacing={2} pl={5}>
                   <ListItem><strong>Consent</strong> - Review and agree to participate (this page)</ListItem>
                   <ListItem><strong>Demographics</strong> - Complete a brief demographic questionnaire (2-3 minutes)</ListItem>
-                  <ListItem><strong>Main Study</strong> - View and evaluate {userData?.assignedImages?.length || '10'} images using provided rating scales</ListItem>
+                  <ListItem><strong>Main Study</strong> - View and evaluate {userData?.assignedImages?.length || '10'} images using provided rating scales(13 minutes)</ListItem>
                 </OrderedList>
               </Box>
               
               <Divider />
               
               <Box>
-                <Heading size="md" mb={3}>Time Commitment</Heading>
-                <Text>
-                  The entire process is expected to take approximately 20-25 minutes total:
-                </Text>
-                <UnorderedList spacing={1} pl={5} mt={2}>
-                  <ListItem>Demographics survey: 2-3 minutes</ListItem>
-                  <ListItem>Main image evaluation: 15-20 minutes</ListItem>
-                </UnorderedList>
-              </Box>
-              
-              <Divider />
-              
-              <Box>
                 <Heading size="md" mb={3}>Risks and Benefits</Heading>
-                <Text mb={2}><strong>Risks:</strong> There are minimal risks associated with this study. The images you will view do not contain graphic or disturbing content.</Text>
-                <Text><strong>Benefits:</strong> Your participation contributes to research in visual perception and evaluation. There are no direct benefits to you as a participant.</Text>
+                <Text mb={2}><strong>Risks:</strong> You will be asked questions about the similarity of images, whether they contain particular things or
+people like children or products, and other questions about how you perceive the images. We do not
+anticipate that you will encounter any risks beyond those you encounter in your regular use of the
+internet.</Text>
+                <Text><strong>Benefits:</strong> There are no direct personal benefits from participating in this research. However, your participation
+will contribute to a better understanding of how to protect people from the generation of synthetic
+images that depict them without their consent..</Text>
               </Box>
               
               <Divider />
@@ -288,11 +279,10 @@ const ConsentPage = () => {
               <Box>
                 <Heading size="md" mb={3}>Contact Information</Heading>
                 <Text mb={2}>
-                  If you have questions about this research study, please contact the research team at:
+                  If you have questions about this study, contact the research team at:
                 </Text>
                 <UnorderedList spacing={1} pl={5}>
-                  <ListItem>Email: research@example.edu</ListItem>
-                  <ListItem>Phone: (123) 456-7890</ListItem>
+                  <ListItem>digitalharmstudies@gmail.com</ListItem>
                 </UnorderedList>
               </Box>
               

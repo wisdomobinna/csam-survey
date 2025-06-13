@@ -1,5 +1,5 @@
 {
-  "name": "csam-survey",
+  "name": "c-image-survey",
   "version": "1.0.0",
   "description": "Image Evaluation Survey with Prolific Integration",
   "private": true,
@@ -40,5 +40,5 @@
       "last 1 safari version"
     ]
   },
-  "homepage": "https://csam-survey.web.app"
+  "homepage": "https://c-image-survey.web.app"
 }

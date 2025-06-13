@@ -1,20 +1,7 @@
-// rules_version = '2';
-// service cloud.firestore {
-//   match /databases/{database}/documents {
-//     match /users/{userId} {
-//       allow read, write: if true;
-//     }
-//     match /images/{imageId} {
-//       allow read, write: if true;
-//     }
-//   }
-// }
-
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     match /{document=**} {
-      // Temporarily allow all access to debug the issue
       allow read, write: if true;
     }
   }
