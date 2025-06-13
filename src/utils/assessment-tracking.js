@@ -1,4 +1,4 @@
-// src/utils/assessment-tracking.js - Updated for new system
+// src/utils/assessment-tracking.js - Updated for new flow: Consent → Main Survey → Demographics → Completion
 import { increment, serverTimestamp } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import { collection, doc, getDoc, getDocs, writeBatch, setDoc, updateDoc } from 'firebase/firestore';
@@ -65,7 +65,10 @@ export const getUserProgress = async (userId) => {
         completedCount: 0,
         totalAssigned: 0,
         completedImages: {},
-        assignedImages: []
+        assignedImages: [],
+        mainSurveyCompleted: false,
+        demographicsCompleted: false,
+        surveyCompleted: false
       };
     }
 
@@ -77,7 +80,10 @@ export const getUserProgress = async (userId) => {
       completedCount: completedImages,
       totalAssigned: assignedImages.length,
       completedImages: {},
-      assignedImages: assignedImages
+      assignedImages: assignedImages,
+      mainSurveyCompleted: userData.mainSurveyCompleted || false,
+      demographicsCompleted: userData.demographicsCompleted || false,
+      surveyCompleted: userData.surveyCompleted || false
     };
   } catch (error) {
     console.error('Error getting user progress:', error);
@@ -85,7 +91,7 @@ export const getUserProgress = async (userId) => {
   }
 };
 
-// Helper function to check if a user has completed all assigned images
+// UPDATED: Helper function to check if a user has completed the ENTIRE study (new flow)
 export const checkSurveyCompletion = async (userId) => {
   try {
     const userRef = doc(db, 'loginIDs', userId);
@@ -97,8 +103,59 @@ export const checkSurveyCompletion = async (userId) => {
     
     const userData = userDoc.data();
     
-    // Check if explicitly marked as completed
+    // NEW FLOW: Check if ENTIRE study is completed (main survey + demographics)
     if (userData.surveyCompleted) {
+      console.log('Assessment-tracking: User has completed entire study (surveyCompleted = true)');
+      return true;
+    }
+    
+    // ALSO check if both main survey and demographics are completed
+    if (userData.mainSurveyCompleted && userData.demographicsCompleted) {
+      console.log('Assessment-tracking: User has completed both main survey and demographics');
+      return true;
+    }
+    
+    // Legacy check: if they've completed all assigned images AND demographics
+    const assignedImages = userData.assignedImages || [];
+    const completedImages = userData.completedImages || 0;
+    
+    const mainSurveyComplete = completedImages >= assignedImages.length && assignedImages.length > 0;
+    const demographicsComplete = userData.demographicsCompleted || false;
+    
+    if (mainSurveyComplete && demographicsComplete) {
+      console.log('Assessment-tracking: User has completed all images and demographics (legacy check)');
+      return true;
+    }
+    
+    console.log('Assessment-tracking: User has not completed entire study yet', {
+      mainSurveyCompleted: userData.mainSurveyCompleted,
+      demographicsCompleted: userData.demographicsCompleted,
+      surveyCompleted: userData.surveyCompleted,
+      completedImages: completedImages,
+      totalImages: assignedImages.length
+    });
+    
+    return false;
+  } catch (error) {
+    console.error('Error checking survey completion:', error);
+    throw error;
+  }
+};
+
+// NEW: Helper function to check if main survey (images) is completed
+export const checkMainSurveyCompletion = async (userId) => {
+  try {
+    const userRef = doc(db, 'loginIDs', userId);
+    const userDoc = await getDoc(userRef);
+    
+    if (!userDoc.exists()) {
+      return false;
+    }
+    
+    const userData = userDoc.data();
+    
+    // Check explicit flag first
+    if (userData.mainSurveyCompleted) {
       return true;
     }
     
@@ -108,12 +165,69 @@ export const checkSurveyCompletion = async (userId) => {
     
     return completedImages >= assignedImages.length && assignedImages.length > 0;
   } catch (error) {
-    console.error('Error checking survey completion:', error);
+    console.error('Error checking main survey completion:', error);
     throw error;
   }
 };
 
-// Function to get detailed statistics for admin dashboard
+// NEW: Helper function to check if demographics is completed
+export const checkDemographicsCompletion = async (userId) => {
+  try {
+    const userRef = doc(db, 'loginIDs', userId);
+    const userDoc = await getDoc(userRef);
+    
+    if (!userDoc.exists()) {
+      return false;
+    }
+    
+    const userData = userDoc.data();
+    return userData.demographicsCompleted || false;
+  } catch (error) {
+    console.error('Error checking demographics completion:', error);
+    throw error;
+  }
+};
+
+// NEW: Mark main survey as completed
+export const markMainSurveyCompleted = async (userId) => {
+  try {
+    const userRef = doc(db, 'loginIDs', userId);
+    await updateDoc(userRef, {
+      mainSurveyCompleted: true,
+      mainSurveyCompletedAt: serverTimestamp(),
+      lastUpdated: serverTimestamp()
+    });
+    
+    console.log('Main survey marked as completed for user:', userId);
+    return true;
+  } catch (error) {
+    console.error('Error marking main survey as completed:', error);
+    throw error;
+  }
+};
+
+// NEW: Mark demographics as completed (and entire study)
+export const markDemographicsCompleted = async (userId, demographicsData = {}) => {
+  try {
+    const userRef = doc(db, 'loginIDs', userId);
+    await updateDoc(userRef, {
+      demographicsCompleted: true,
+      demographicsCompletedAt: serverTimestamp(),
+      surveyCompleted: true, // Mark entire study as completed
+      completedAt: serverTimestamp(),
+      lastUpdated: serverTimestamp(),
+      demographicsData: demographicsData
+    });
+    
+    console.log('Demographics and entire study marked as completed for user:', userId);
+    return true;
+  } catch (error) {
+    console.error('Error marking demographics as completed:', error);
+    throw error;
+  }
+};
+
+// Function to get detailed statistics for admin dashboard - UPDATED for new flow
 export const getDetailedStats = async () => {
   try {
     // Get all images
@@ -139,9 +253,12 @@ export const getDetailedStats = async () => {
       totalViews += (data.viewCount || 0);
     });
     
-    // Get all users
+    // Get all users - UPDATED stats for new flow
     const usersSnapshot = await getDocs(collection(db, 'loginIDs'));
     let completedUsers = 0;
+    let mainSurveyCompletedUsers = 0;
+    let demographicsCompletedUsers = 0;
+    let consentedUsers = 0;
     let totalUsers = 0;
     
     usersSnapshot.docs.forEach(doc => {
@@ -149,17 +266,24 @@ export const getDetailedStats = async () => {
       
       totalUsers++;
       const userData = doc.data();
-      if (userData.surveyCompleted) {
-        completedUsers++;
-      }
+      
+      if (userData.hasConsented) consentedUsers++;
+      if (userData.mainSurveyCompleted) mainSurveyCompletedUsers++;
+      if (userData.demographicsCompleted) demographicsCompletedUsers++;
+      if (userData.surveyCompleted) completedUsers++;
     });
     
     return {
       imageStats,
       totalViews,
-      completedUsers,
       totalUsers,
-      completionRate: totalUsers > 0 ? (completedUsers / totalUsers) * 100 : 0
+      consentedUsers,
+      mainSurveyCompletedUsers,
+      demographicsCompletedUsers,
+      completedUsers, // Entire study completed
+      completionRate: totalUsers > 0 ? (completedUsers / totalUsers) * 100 : 0,
+      mainSurveyCompletionRate: totalUsers > 0 ? (mainSurveyCompletedUsers / totalUsers) * 100 : 0,
+      demographicsCompletionRate: totalUsers > 0 ? (demographicsCompletedUsers / totalUsers) * 100 : 0
     };
   } catch (error) {
     console.error('Error getting detailed stats:', error);
@@ -167,7 +291,7 @@ export const getDetailedStats = async () => {
   }
 };
 
-// Function to export data for analysis
+// Function to export data for analysis - UPDATED for new flow
 export const exportSurveyData = async () => {
   try {
     const results = {
@@ -176,7 +300,7 @@ export const exportSurveyData = async () => {
       assessments: []
     };
     
-    // Export user data
+    // Export user data - UPDATED with new flow fields
     const usersSnapshot = await getDocs(collection(db, 'loginIDs'));
     usersSnapshot.docs.forEach(doc => {
       if (doc.id === 'ADMIN') return;
@@ -187,10 +311,15 @@ export const exportSurveyData = async () => {
         prolificId: userData.prolificData?.prolificPid || null,
         assignedImages: userData.assignedImages || [],
         completedImages: userData.completedImages || 0,
-        surveyCompleted: userData.surveyCompleted || false,
         hasConsented: userData.hasConsented || false,
+        mainSurveyCompleted: userData.mainSurveyCompleted || false,
+        demographicsCompleted: userData.demographicsCompleted || false,
+        surveyCompleted: userData.surveyCompleted || false, // Entire study
         createdAt: userData.createdAt,
-        lastLogin: userData.lastLogin
+        lastLogin: userData.lastLogin,
+        mainSurveyCompletedAt: userData.mainSurveyCompletedAt,
+        demographicsCompletedAt: userData.demographicsCompletedAt,
+        completedAt: userData.completedAt
       });
     });
     
@@ -230,7 +359,7 @@ export const exportSurveyData = async () => {
   }
 };
 
-// Function to validate system integrity
+// Function to validate system integrity - UPDATED for new flow
 export const validateSystemIntegrity = async () => {
   try {
     const issues = [];
@@ -247,18 +376,18 @@ export const validateSystemIntegrity = async () => {
       const userData = userDoc.data();
       const assignedImages = userData.assignedImages || [];
       
-      // Check if user has exactly 4 assigned images
-      if (assignedImages.length !== 4) {
+      // Check if user has assigned images
+      if (assignedImages.length === 0) {
         issues.push({
-          type: 'invalid_assignment_count',
+          type: 'no_assigned_images',
           userId: userDoc.id,
-          assignedCount: assignedImages.length,
-          expected: 4
+          message: 'User has no assigned images'
         });
       }
       
       // Check if all assigned images exist
-      for (const imageId of assignedImages) {
+      for (const imageData of assignedImages) {
+        const imageId = imageData.id || imageData.name || 'unknown';
         if (!imageIds.has(imageId)) {
           issues.push({
             type: 'missing_image',
@@ -268,21 +397,40 @@ export const validateSystemIntegrity = async () => {
         }
       }
       
-      // Check folder distribution (should have one from each folder)
-      const folders = new Set();
-      for (const imageId of assignedImages) {
-        const imageDoc = imagesSnapshot.docs.find(doc => doc.id === imageId);
-        if (imageDoc) {
-          folders.add(imageDoc.data().folder);
-        }
+      // Check flow consistency - NEW FLOW VALIDATION
+      if (userData.demographicsCompleted && !userData.mainSurveyCompleted) {
+        issues.push({
+          type: 'invalid_flow_state',
+          userId: userDoc.id,
+          message: 'Demographics completed but main survey not completed (invalid in new flow)'
+        });
       }
       
-      if (folders.size !== 4) {
+      if (userData.surveyCompleted && (!userData.mainSurveyCompleted || !userData.demographicsCompleted)) {
         issues.push({
-          type: 'invalid_folder_distribution',
+          type: 'inconsistent_completion_state',
           userId: userDoc.id,
-          folders: Array.from(folders),
-          expected: 4
+          message: 'Survey marked complete but main survey or demographics not completed'
+        });
+      }
+      
+      // Check if main survey completion is consistent with image completion
+      const completedImages = userData.completedImages || 0;
+      const totalImages = assignedImages.length;
+      
+      if (userData.mainSurveyCompleted && completedImages < totalImages) {
+        issues.push({
+          type: 'main_survey_inconsistency',
+          userId: userDoc.id,
+          message: `Main survey marked complete but only ${completedImages}/${totalImages} images completed`
+        });
+      }
+      
+      if (!userData.mainSurveyCompleted && completedImages >= totalImages && totalImages > 0) {
+        issues.push({
+          type: 'main_survey_not_marked',
+          userId: userDoc.id,
+          message: `All images completed but main survey not marked as complete`
         });
       }
     }
@@ -293,6 +441,293 @@ export const validateSystemIntegrity = async () => {
     };
   } catch (error) {
     console.error('Error validating system integrity:', error);
+    throw error;
+  }
+};
+
+// NEW: Get user's current step in the study flow
+export const getUserStudyStep = async (userId) => {
+  try {
+    const userRef = doc(db, 'loginIDs', userId);
+    const userDoc = await getDoc(userRef);
+    
+    if (!userDoc.exists()) {
+      return 'not_found';
+    }
+    
+    const userData = userDoc.data();
+    
+    // Check completion status in order
+    if (userData.surveyCompleted) {
+      return 'completed';
+    }
+    
+    if (userData.mainSurveyCompleted && userData.demographicsCompleted) {
+      return 'completed'; // Both done = completed
+    }
+    
+    if (userData.mainSurveyCompleted && !userData.demographicsCompleted) {
+      return 'demographics'; // Main done, need demographics
+    }
+    
+    if (userData.hasConsented && !userData.mainSurveyCompleted) {
+      return 'main_survey'; // Consented, need to do main survey
+    }
+    
+    if (!userData.hasConsented) {
+      return 'consent'; // Need to consent
+    }
+    
+    return 'unknown';
+  } catch (error) {
+    console.error('Error getting user study step:', error);
+    return 'error';
+  }
+};
+
+// NEW: Get study flow progress statistics
+export const getStudyFlowStats = async () => {
+  try {
+    const usersSnapshot = await getDocs(collection(db, 'loginIDs'));
+    
+    const stats = {
+      total: 0,
+      atConsent: 0,
+      atMainSurvey: 0,
+      atDemographics: 0,
+      completed: 0,
+      unknown: 0
+    };
+    
+    for (const userDoc of usersSnapshot.docs) {
+      if (userDoc.id === 'ADMIN') continue;
+      
+      stats.total++;
+      const step = await getUserStudyStep(userDoc.id);
+      
+      switch (step) {
+        case 'consent':
+          stats.atConsent++;
+          break;
+        case 'main_survey':
+          stats.atMainSurvey++;
+          break;
+        case 'demographics':
+          stats.atDemographics++;
+          break;
+        case 'completed':
+          stats.completed++;
+          break;
+        default:
+          stats.unknown++;
+      }
+    }
+    
+    return stats;
+  } catch (error) {
+    console.error('Error getting study flow stats:', error);
+    throw error;
+  }
+};
+
+// NEW: Migrate users from old flow to new flow (admin utility)
+export const migrateUsersToNewFlow = async () => {
+  try {
+    console.log('Starting migration to new flow...');
+    
+    const usersSnapshot = await getDocs(collection(db, 'loginIDs'));
+    const batch = writeBatch(db);
+    let migratedCount = 0;
+    let batchCount = 0;
+    
+    for (const userDoc of usersSnapshot.docs) {
+      if (userDoc.id === 'ADMIN') continue;
+      
+      const userData = userDoc.data();
+      const updates = {};
+      let needsUpdate = false;
+      
+      // If user has completed all images but mainSurveyCompleted is not set
+      const assignedImages = userData.assignedImages || [];
+      const completedImages = userData.completedImages || 0;
+      
+      if (completedImages >= assignedImages.length && assignedImages.length > 0 && !userData.mainSurveyCompleted) {
+        updates.mainSurveyCompleted = true;
+        updates.mainSurveyCompletedAt = userData.completedAt || serverTimestamp();
+        needsUpdate = true;
+        console.log(`Migrating user ${userDoc.id}: marking main survey as completed`);
+      }
+      
+      // If user has both main survey and demographics done but surveyCompleted is not set
+      const mainComplete = userData.mainSurveyCompleted || (completedImages >= assignedImages.length && assignedImages.length > 0);
+      const demoComplete = userData.demographicsCompleted;
+      
+      if (mainComplete && demoComplete && !userData.surveyCompleted) {
+        updates.surveyCompleted = true;
+        updates.completedAt = userData.demographicsCompletedAt || userData.completedAt || serverTimestamp();
+        needsUpdate = true;
+        console.log(`Migrating user ${userDoc.id}: marking entire survey as completed`);
+      }
+      
+      if (needsUpdate) {
+        updates.lastUpdated = serverTimestamp();
+        updates.migratedToNewFlow = true;
+        updates.migrationDate = serverTimestamp();
+        
+        batch.update(userDoc.ref, updates);
+        migratedCount++;
+        batchCount++;
+        
+        // Commit batch if we're approaching the limit
+        if (batchCount >= 450) {
+          await batch.commit();
+          console.log(`Committed batch of ${batchCount} user updates`);
+          batchCount = 0;
+          // Create new batch for remaining operations
+        }
+      }
+    }
+    
+    // Commit any remaining operations
+    if (batchCount > 0) {
+      await batch.commit();
+      console.log(`Committed final batch of ${batchCount} user updates`);
+    }
+    
+    if (migratedCount > 0) {
+      console.log(`Successfully migrated ${migratedCount} users to new flow`);
+    } else {
+      console.log('No users needed migration');
+    }
+    
+    return {
+      success: true,
+      migratedCount: migratedCount,
+      totalUsers: usersSnapshot.size - 1 // Exclude admin
+    };
+  } catch (error) {
+    console.error('Error migrating users to new flow:', error);
+    throw error;
+  }
+};
+
+// NEW: Force complete main survey for a user (admin utility)
+export const forceCompleteMainSurvey = async (userId) => {
+  try {
+    const userRef = doc(db, 'loginIDs', userId);
+    const userDoc = await getDoc(userRef);
+    
+    if (!userDoc.exists()) {
+      throw new Error('User not found');
+    }
+    
+    const userData = userDoc.data();
+    const assignedImages = userData.assignedImages || [];
+    
+    await updateDoc(userRef, {
+      mainSurveyCompleted: true,
+      mainSurveyCompletedAt: serverTimestamp(),
+      completedImages: assignedImages.length, // Mark all images as completed
+      lastUpdated: serverTimestamp(),
+      forceCompleted: true,
+      forceCompletedAt: serverTimestamp()
+    });
+    
+    console.log(`Force completed main survey for user: ${userId}`);
+    return true;
+  } catch (error) {
+    console.error('Error force completing main survey:', error);
+    throw error;
+  }
+};
+
+// NEW: Reset user progress (admin utility)
+export const resetUserProgress = async (userId, resetLevel = 'partial') => {
+  try {
+    const userRef = doc(db, 'loginIDs', userId);
+    const userDoc = await getDoc(userRef);
+    
+    if (!userDoc.exists()) {
+      throw new Error('User not found');
+    }
+    
+    const updates = {
+      lastUpdated: serverTimestamp(),
+      resetAt: serverTimestamp(),
+      resetLevel: resetLevel
+    };
+    
+    if (resetLevel === 'full') {
+      // Reset everything except assignment
+      updates.hasConsented = false;
+      updates.mainSurveyCompleted = false;
+      updates.demographicsCompleted = false;
+      updates.surveyCompleted = false;
+      updates.completedImages = 0;
+      updates.completedImageIds = [];
+    } else if (resetLevel === 'demographics') {
+      // Reset only demographics
+      updates.demographicsCompleted = false;
+      updates.surveyCompleted = false;
+    } else if (resetLevel === 'main_survey') {
+      // Reset main survey and everything after
+      updates.mainSurveyCompleted = false;
+      updates.demographicsCompleted = false;
+      updates.surveyCompleted = false;
+      updates.completedImages = 0;
+      updates.completedImageIds = [];
+    }
+    
+    await updateDoc(userRef, updates);
+    
+    console.log(`Reset user progress for ${userId} at level: ${resetLevel}`);
+    return true;
+  } catch (error) {
+    console.error('Error resetting user progress:', error);
+    throw error;
+  }
+};
+
+// NEW: Get completion timeline for a user
+export const getUserCompletionTimeline = async (userId) => {
+  try {
+    const userRef = doc(db, 'loginIDs', userId);
+    const userDoc = await getDoc(userRef);
+    
+    if (!userDoc.exists()) {
+      return null;
+    }
+    
+    const userData = userDoc.data();
+    
+    const timeline = {
+      userId: userId,
+      created: userData.createdAt,
+      consented: userData.consentedAt,
+      mainSurveyCompleted: userData.mainSurveyCompletedAt,
+      demographicsCompleted: userData.demographicsCompletedAt,
+      studyCompleted: userData.completedAt,
+      totalTimeSpent: null,
+      mainSurveyTimeSpent: null,
+      demographicsTimeSpent: null
+    };
+    
+    // Calculate time spent if timestamps are available
+    if (timeline.consented && timeline.mainSurveyCompleted) {
+      timeline.mainSurveyTimeSpent = timeline.mainSurveyCompleted.toDate() - timeline.consented.toDate();
+    }
+    
+    if (timeline.mainSurveyCompleted && timeline.demographicsCompleted) {
+      timeline.demographicsTimeSpent = timeline.demographicsCompleted.toDate() - timeline.mainSurveyCompleted.toDate();
+    }
+    
+    if (timeline.consented && timeline.studyCompleted) {
+      timeline.totalTimeSpent = timeline.studyCompleted.toDate() - timeline.consented.toDate();
+    }
+    
+    return timeline;
+  } catch (error) {
+    console.error('Error getting user completion timeline:', error);
     throw error;
   }
 };

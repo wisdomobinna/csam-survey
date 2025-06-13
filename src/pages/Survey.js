@@ -1,4 +1,4 @@
-// src/pages/Survey.js - Combined Demographics and Main Survey with Prolific Integration
+// src/pages/Survey.js - Updated flow: Consent → Main Survey → Demographics → Completion
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
@@ -47,12 +47,13 @@ const Survey = () => {
   const [isFormCompleted, setIsFormCompleted] = useState(false);
   const [lastResponse, setLastResponse] = useState(null);
   
-  // Demographics survey states
+  // Demographics survey states - NOW COMES AFTER MAIN SURVEY
   const [showingDemographics, setShowingDemographics] = useState(false);
   const [demographicsCompleted, setDemographicsCompleted] = useState(false);
   const [demographicsLoaded, setDemographicsLoaded] = useState(false);
   const [lastQuestionReached, setLastQuestionReached] = useState(false);
   const [processingDemographics, setProcessingDemographics] = useState(false);
+  const [isCompletingStudy, setIsCompletingStudy] = useState(false); // NEW: Track completion state
   
   const navigate = useNavigate();
   const toast = useToast();
@@ -88,33 +89,40 @@ const Survey = () => {
       const userData = userDoc.data();
       console.log('Survey: User data loaded:', {
         hasConsented: userData.hasConsented,
+        mainSurveyCompleted: userData.mainSurveyCompleted,
         demographicsCompleted: userData.demographicsCompleted,
         surveyCompleted: userData.surveyCompleted,
         assignedImages: userData.assignedImages?.length,
         completedImages: userData.completedImages
       });
       
+      // UPDATED FLOW LOGIC:
+      // 1. Check consent first
       if (!userData.hasConsented) {
         console.log('Survey: User has not consented, redirecting to consent page');
         navigate('/consent');
         return;
       }
       
-      // Check if demographics survey needs to be completed first
-      if (!userData.demographicsCompleted) {
-        console.log('Survey: Demographics not completed, showing demographics survey');
+      // 2. Check if FULLY completed (main survey + demographics)
+      const isFullyCompleted = await checkSurveyCompletion(userId);
+      if (isFullyCompleted || userData.surveyCompleted) {
+        console.log('Survey: User has completed entire study, redirecting to completion page');
+        navigate('/completion');
+        return;
+      }
+      
+      // 3. Check if main survey is completed but demographics is not
+      if (userData.mainSurveyCompleted && !userData.demographicsCompleted) {
+        console.log('Survey: Main survey completed, showing demographics survey');
         setShowingDemographics(true);
         setDemographicsCompleted(false);
         setLoading(false);
         return;
       }
       
-      const isCompleted = await checkSurveyCompletion(userId);
-      if (isCompleted || userData.surveyCompleted) {
-        console.log('Survey: User has completed survey, redirecting to completion page');
-        navigate('/completion');
-        return;
-      }
+      // 4. If we get here, user needs to do main survey
+      console.log('Survey: Starting main survey (images evaluation)');
       
       const assignedImages = userData.assignedImages || [];
       console.log('Survey: Assigned images:', assignedImages);
@@ -305,7 +313,7 @@ const Survey = () => {
     loadUserData();
   }, [loadUserData]);
 
-  // Handle demographics completion
+  // Handle demographics completion - NOW AT THE END
   const handleDemographicsCompletion = useCallback(async (surveyData = {}) => {
     if (processingDemographics) return;
     
@@ -321,26 +329,29 @@ const Survey = () => {
       await updateDoc(userRef, {
         demographicsCompleted: true,
         demographicsCompletedAt: serverTimestamp(),
+        surveyCompleted: true, // MARK AS FULLY COMPLETED NOW
+        completedAt: serverTimestamp(),
         lastUpdated: serverTimestamp(),
         demographicsData: surveyData,
       });
 
-      console.log('Survey: Demographics completion saved, loading main survey...');
+      console.log('Survey: Demographics completion saved, study is now complete!');
 
       toast({
-        title: 'Demographics Completed',
-        description: 'Loading main study...',
+        title: 'Study Completed!',
+        description: 'Thank you for your participation. Redirecting to completion page...',
         status: 'success',
-        duration: 2000,
+        duration: 3000,
       });
 
       setDemographicsCompleted(true);
       setShowingDemographics(false);
+      setIsCompletingStudy(true); // NEW: Set completing state
       
-      // Now load the main survey
+      // Now redirect to completion page
       setTimeout(() => {
-        loadUserData();
-      }, 1000);
+        navigate('/completion');
+      }, 2000);
       
     } catch (err) {
       console.error('Error saving demographics completion:', err);
@@ -354,7 +365,7 @@ const Survey = () => {
     } finally {
       setProcessingDemographics(false);
     }
-  }, [sessionData.userId, toast, loadUserData, processingDemographics]);
+  }, [sessionData.userId, toast, navigate, processingDemographics]);
 
   // Combined message listener for both demographics and main survey
   useEffect(() => {
@@ -503,21 +514,26 @@ const Survey = () => {
         duration: 2000,
       });
       
+      // UPDATED: Check if all images are completed
       if (newCompletedCount >= images.length) {
+        // Mark main survey as completed, but NOT the full study yet
         await updateDoc(userRef, {
-          surveyCompleted: true,
-          completedAt: serverTimestamp()
+          mainSurveyCompleted: true,
+          mainSurveyCompletedAt: serverTimestamp()
         });
         
         toast({
-          title: 'Study Completed!',
-          description: 'Thank you for your participation',
+          title: 'Image Evaluation Complete!',
+          description: 'Now proceeding to demographics survey...',
           status: 'success',
           duration: 3000,
         });
         
+        // Switch to demographics survey
         setTimeout(() => {
-          navigate('/completion');
+          setShowingDemographics(true);
+          // Don't clear images array - keep it for reference
+          // setImages([]); // ← Removed this line
         }, 2000);
       } else {
         toast({
@@ -576,14 +592,13 @@ const Survey = () => {
       return;
     }
 
-    // [Your existing manual next logic here - shortened for space]
     console.log('Manual next triggered');
   };
 
   // Generate URLs for both demographics and main survey with Prolific integration
   const generateQualtricsUrl = (isDemographics = false) => {
     if (isDemographics) {
-      // DEMOGRAPHICS SURVEY - Capture Prolific data here
+      // DEMOGRAPHICS SURVEY - NOW AT THE END - Capture Prolific data here
       const baseUrl = 'https://georgetown.az1.qualtrics.com/jfe/form/SV_0lcUfUbcn7vo7qe';
       const userId = sessionStorage.getItem('userLoginId') || 'unknown';
       const prolificPid = sessionStorage.getItem('prolificPid') || 'TEST_USER';
@@ -592,14 +607,14 @@ const Survey = () => {
       const isTestMode = sessionStorage.getItem('testMode') === 'true';
       
       const params = new URLSearchParams({
-        // PROLIFIC DATA - Only captured once here
+        // PROLIFIC DATA - Only captured once here (at the end now)
         PROLIFIC_PID: prolificPid,
         STUDY_ID: studyId,
         SESSION_ID: sessionId,
         
         // LINKING DATA
         loginID: userId,
-        survey_type: 'demographics',
+        survey_type: 'demographics_final', // Updated to indicate this is at the end
         is_test_mode: isTestMode ? 'true' : 'false',
         entry_timestamp: new Date().toISOString(),
         
@@ -609,10 +624,10 @@ const Survey = () => {
         completion_redirect: 'false'
       });
       
-      console.log('Demographics: Capturing Prolific data:', {
+      console.log('Demographics: Capturing Prolific data (at end of study):', {
         PROLIFIC_PID: prolificPid,
         loginID: userId,
-        survey_type: 'demographics'
+        survey_type: 'demographics_final'
       });
       
       return `${baseUrl}?${params.toString()}`;
@@ -644,7 +659,7 @@ const Survey = () => {
       }
       
       const params = new URLSearchParams({
-        // LINKING DATA - Connect back to demographics via loginID
+        // LINKING DATA - Connect back to user via loginID
         loginID: userId,
         
         // IMAGE/EVALUATION DATA
@@ -666,7 +681,7 @@ const Survey = () => {
         preventAutoAdvance: 'true'
       });
       
-      console.log('Main Survey: Image evaluation data (no Prolific PID needed):', {
+      console.log('Main Survey: Image evaluation data:', {
         loginID: userId,
         ImageID: currentImage.id,
         ImageNumber: imageNumber
@@ -723,7 +738,24 @@ const Survey = () => {
     );
   }
 
-  // DEMOGRAPHICS SURVEY RENDER
+  // Show completion screen if study is being completed
+  if (isCompletingStudy) {
+    return (
+      <Box display="flex" justifyContent="center" alignItems="center" minH="100vh" bg="gray.50">
+        <VStack spacing={4}>
+          <Spinner size="xl" color="green.500" />
+          <Text fontSize="lg" fontWeight="bold" color="green.600">
+            Study Completed! 🎉
+          </Text>
+          <Text color="gray.600">
+            Thank you for your participation. Redirecting to completion page...
+          </Text>
+        </VStack>
+      </Box>
+    );
+  }
+
+  // DEMOGRAPHICS SURVEY RENDER - NOW AT THE END
   if (showingDemographics) {
     return (
       <Box minH="100vh" bg="gray.50">
@@ -732,8 +764,8 @@ const Survey = () => {
             <VStack spacing={2}>
               <Heading>Demographics Survey</Heading>
               <HStack spacing={2}>
-                <Badge colorScheme="blue">Step 2 of 3</Badge>
-                <Badge colorScheme="gray">Consent → Demographics → Main Study</Badge>
+                <Badge colorScheme="blue">Final Step</Badge>
+                <Badge colorScheme="gray">Consent → Main Study → Demographics → Complete</Badge>
                 {sessionData.isTestMode && (
                   <Badge colorScheme="orange">Test Mode</Badge>
                 )}
@@ -744,10 +776,21 @@ const Survey = () => {
 
         <Container maxW="4xl" py={6}>
           <VStack spacing={6}>
+            <Alert status="success" borderRadius="md">
+              <AlertIcon />
+              <Box>
+                <AlertTitle>Image Evaluation Complete! 🎉</AlertTitle>
+                <AlertDescription>
+                  You've successfully evaluated all assigned images. 
+                  Please complete this final demographics survey to finish the study.
+                </AlertDescription>
+              </Box>
+            </Alert>
+
             <Card h="600px">
               <CardHeader>
                 <HStack justify="space-between">
-                  <Text fontSize="lg" fontWeight="bold">📊 Demographics Survey</Text>
+                  <Text fontSize="lg" fontWeight="bold">📊 Final Demographics Survey</Text>
                   {surveyLoading && <Spinner size="sm" />}
                   {demographicsLoaded && !surveyLoading && (
                     <Badge colorScheme="green">Survey Loaded</Badge>
@@ -763,7 +806,7 @@ const Survey = () => {
                     <Flex position="absolute" inset="0" bg="white" zIndex={10} align="center" justify="center">
                       <VStack spacing={3}>
                         <Spinner size="lg" color="blue.500" />
-                        <Text>Loading demographics survey...</Text>
+                        <Text>Loading final demographics survey...</Text>
                       </VStack>
                     </Flex>
                   )}
@@ -792,9 +835,9 @@ const Survey = () => {
                     <VStack spacing={3}>
                       <Alert status="success">
                         <AlertIcon />
-                        Demographics survey completed successfully!
+                        Study completed successfully! Redirecting to completion page...
                       </Alert>
-                      <Text color="gray.600">Loading main study...</Text>
+                      <Text color="gray.600">Thank you for your participation!</Text>
                       <Spinner />
                     </VStack>
                   ) : (
@@ -811,13 +854,13 @@ const Survey = () => {
                             onClick={() => handleDemographicsCompletion({ type: 'manual_next_button' })}
                             isLoading={processingDemographics}
                           >
-                            Continue to Main Study →
+                            Complete Study →
                           </Button>
                         </VStack>
                       ) : (
                         <Alert status="info">
                           <AlertIcon />
-                          Please complete the demographics survey. The page will automatically advance when finished.
+                          Please complete the final demographics survey to finish the study.
                         </Alert>
                       )}
                     </VStack>
@@ -833,7 +876,27 @@ const Survey = () => {
 
   // MAIN SURVEY RENDER (your existing layout)
   const currentImage = images[currentImageIndex];
-  if (!currentImage) {
+  
+  // If no current image and not showing demographics, show appropriate message
+  if (!currentImage && !showingDemographics) {
+    // If demographics is completed, show completion message instead of error
+    if (demographicsCompleted) {
+      return (
+        <Box display="flex" justifyContent="center" alignItems="center" minH="100vh" bg="gray.50">
+          <VStack spacing={4}>
+            <Spinner size="xl" color="green.500" />
+            <Text fontSize="lg" fontWeight="bold" color="green.600">
+              Study Completed! 🎉
+            </Text>
+            <Text color="gray.600">
+              Thank you for your participation. Redirecting to completion page...
+            </Text>
+          </VStack>
+        </Box>
+      );
+    }
+    
+    // Otherwise show the regular no image error
     return (
       <Box display="flex" justifyContent="center" alignItems="center" minH="100vh" bg="gray.50">
         <Alert status="warning" maxW="md">
@@ -865,6 +928,8 @@ const Survey = () => {
                 <Badge colorScheme="green">
                   {completedImages.size} completed
                 </Badge>
+                <Badge colorScheme="purple">Step 2 of 3</Badge>
+                <Badge colorScheme="gray">Consent → Main Study → Demographics</Badge>
                 {sessionData.isTestMode && (
                   <Badge colorScheme="orange">Test Mode</Badge>
                 )}
@@ -945,7 +1010,7 @@ const Survey = () => {
                       <Alert status="success" size="sm">
                         <AlertIcon />
                         <Text fontSize="sm">
-                          Survey completed! {isLastImage ? 'Study will complete soon.' : 'Moving to next image...'}
+                          Survey completed! {isLastImage ? 'Moving to demographics...' : 'Moving to next image...'}
                         </Text>
                       </Alert>
                     )}
@@ -967,11 +1032,11 @@ const Survey = () => {
                         size="lg"
                         onClick={handleManualNext}
                         isLoading={processingNext}
-                        loadingText={isLastImage ? "Completing Study..." : "Saving..."}
+                        loadingText={isLastImage ? "Moving to Demographics..." : "Saving..."}
                         w="full"
                         variant="outline"
                       >
-                        {isLastImage ? "Complete Study" : "Next Image →"}
+                        {isLastImage ? "Continue to Demographics" : "Next Image →"}
                       </Button>
                     )}
                   </VStack>
@@ -1046,7 +1111,7 @@ const Survey = () => {
                         </Text>
                         <Text fontSize="md" color="gray.600" textAlign="center">
                           {isLastImage 
-                            ? 'Study will complete shortly...' 
+                            ? 'Preparing demographics survey...' 
                             : 'Preparing next image...'}
                         </Text>
                         {!isLastImage && (
@@ -1067,7 +1132,7 @@ const Survey = () => {
             <VStack spacing={3}>
               <HStack w="full" justify="space-between">
                 <Text fontSize="sm" fontWeight="medium">
-                  Study Progress
+                  Image Evaluation Progress
                 </Text>
                 <Text fontSize="sm" color="gray.600">
                   {completedImages.size} of {images.length} images completed
@@ -1101,10 +1166,10 @@ const Survey = () => {
                 <Alert status="success" borderRadius="md">
                   <AlertIcon />
                   <Box>
-                    <AlertTitle>Study Complete!</AlertTitle>
+                    <AlertTitle>Image Evaluation Complete!</AlertTitle>
                     <AlertDescription>
                       You have successfully evaluated all assigned images. 
-                      You will be redirected to the completion page shortly.
+                      Please proceed to the final demographics survey.
                     </AlertDescription>
                   </Box>
                 </Alert>

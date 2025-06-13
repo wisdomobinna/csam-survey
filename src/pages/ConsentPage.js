@@ -1,4 +1,4 @@
-// src/pages/ConsentPage.js - Updated to redirect to Demographics
+// src/pages/ConsentPage.js - Updated to redirect directly to main survey
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
@@ -63,6 +63,7 @@ const ConsentPage = () => {
         const userData = userDoc.data();
         console.log('ConsentPage: User data loaded:', {
           hasConsented: userData.hasConsented,
+          mainSurveyCompleted: userData.mainSurveyCompleted,
           demographicsCompleted: userData.demographicsCompleted,
           surveyCompleted: userData.surveyCompleted,
           assignedImages: userData.assignedImages?.length
@@ -70,22 +71,24 @@ const ConsentPage = () => {
         
         setUserData(userData);
         
-        // Redirect based on user's progress through the study flow
+        // UPDATED FLOW: Redirect based on user's progress through the NEW study flow
         if (userData.surveyCompleted) {
           console.log('ConsentPage: User has completed entire study, redirecting to completion');
           navigate('/completion');
           return;
         }
         
-        if (userData.hasConsented && userData.demographicsCompleted) {
-          console.log('ConsentPage: User has consented and completed demographics, redirecting to main survey');
+        // Check if user completed main survey but not demographics
+        if (userData.mainSurveyCompleted && !userData.demographicsCompleted) {
+          console.log('ConsentPage: User completed main survey but not demographics, redirecting to survey (will show demographics)');
           navigate('/survey');
           return;
         }
         
-        if (userData.hasConsented && !userData.demographicsCompleted) {
-          console.log('ConsentPage: User has consented but not completed demographics, redirecting to demographics');
-          navigate('/demographics');
+        // Check if user has consented - go directly to main survey now
+        if (userData.hasConsented) {
+          console.log('ConsentPage: User has consented, redirecting directly to main survey');
+          navigate('/survey');
           return;
         }
         
@@ -130,19 +133,19 @@ const ConsentPage = () => {
       console.log('ConsentPage: Updating user document with consent...');
       await updateDoc(userRef, updateData);
       
-      console.log('ConsentPage: Consent saved successfully, navigating to demographics...');
+      console.log('ConsentPage: Consent saved successfully, navigating to main survey...');
       
       toast({
         title: 'Thank you',
-        description: 'Your consent has been recorded. Proceeding to demographics survey...',
+        description: 'Your consent has been recorded. Proceeding to image evaluation...',
         status: 'success',
         duration: 2000,
       });
       
-      // Navigate to demographics instead of survey
+      // UPDATED: Navigate directly to main survey instead of demographics
       setTimeout(() => {
-        console.log('ConsentPage: Navigating to demographics page...');
-        navigate('/demographics');
+        console.log('ConsentPage: Navigating to main survey page...');
+        navigate('/survey');
       }, 1000);
       
     } catch (error) {
@@ -189,7 +192,7 @@ const ConsentPage = () => {
               <Heading size="lg">Research Participant Consent</Heading>
               <HStack spacing={2}>
                 <Badge colorScheme="blue">Step 1 of 3</Badge>
-                <Badge colorScheme="gray">Consent → Demographics → Main Study</Badge>
+                <Badge colorScheme="gray">Consent → Main Study → Demographics</Badge>
               </HStack>
             </VStack>
           </CardHeader>
@@ -211,7 +214,7 @@ const ConsentPage = () => {
                       You have been assigned {userData.assignedImages?.length || 0} images to evaluate.
                     </Text>
                     <Text fontSize="sm" color="blue.600">
-                      After consent, you'll complete a brief demographics survey, then proceed to the main study.
+                      After consent, you'll evaluate the images first, then complete a brief demographics survey.
                     </Text>
                   </VStack>
                 </Alert>
@@ -234,8 +237,8 @@ const ConsentPage = () => {
                 <Text mb={2}>This study consists of three steps:</Text>
                 <OrderedList spacing={2} pl={5}>
                   <ListItem><strong>Consent</strong> - Review and agree to participate (this page)</ListItem>
+                  <ListItem><strong>Image Evaluation</strong> - View and evaluate {userData?.assignedImages?.length || '10'} images using provided rating scales (10-15 minutes)</ListItem>
                   <ListItem><strong>Demographics</strong> - Complete a brief demographic questionnaire (2-3 minutes)</ListItem>
-                  <ListItem><strong>Main Study</strong> - View and evaluate {userData?.assignedImages?.length || '10'} images using provided rating scales(13 minutes)</ListItem>
                 </OrderedList>
               </Box>
               
@@ -319,7 +322,7 @@ images that depict them without their consent..</Text>
                   isDisabled={!isConsented}
                   size="lg"
                 >
-                  I Consent - Continue to Demographics
+                  I Consent - Begin Image Evaluation
                 </Button>
               </Flex>
             </VStack>

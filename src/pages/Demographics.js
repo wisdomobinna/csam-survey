@@ -1,4 +1,4 @@
-// src/pages/Demographics.js - Simplified version with auto-advance after last question
+// src/pages/Demographics.js - Updated as final step only (after main survey)
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -54,18 +54,37 @@ const Demographics = () => {
 
       const data = userDoc.data();
 
+      // UPDATED FLOW: Check user's progress
+      console.log('Demographics: User data:', {
+        hasConsented: data.hasConsented,
+        mainSurveyCompleted: data.mainSurveyCompleted,
+        demographicsCompleted: data.demographicsCompleted,
+        surveyCompleted: data.surveyCompleted
+      });
+
+      // If user hasn't consented, redirect to consent
       if (!data.hasConsented) {
+        console.log('Demographics: User not consented, redirecting to consent');
         navigate('/consent');
         return;
       }
-      if (data.demographicsCompleted) {
+
+      // If user hasn't completed main survey, redirect there
+      if (!data.mainSurveyCompleted) {
+        console.log('Demographics: Main survey not completed, redirecting to survey');
         navigate('/survey');
         return;
       }
-      if (data.surveyCompleted) {
+
+      // If demographics already completed, redirect to completion
+      if (data.demographicsCompleted || data.surveyCompleted) {
+        console.log('Demographics: Already completed, redirecting to completion');
         navigate('/completion');
         return;
       }
+
+      // If we reach here, user should be on demographics (final step)
+      console.log('Demographics: Ready for demographics survey (final step)');
 
     } catch (err) {
       console.error('Error loading user data:', err);
@@ -81,33 +100,37 @@ const Demographics = () => {
 
   const finalizeCompletion = useCallback(async (surveyData = {}) => {
     if (processingCompletion) return;
+    
     try {
       setProcessingCompletion(true);
       const userId = sessionStorage.getItem('userLoginId');
       if (!userId) throw new Error('No user session');
 
-      console.log('Demographics: Finalizing completion for user:', userId);
+      console.log('Demographics: Finalizing FINAL completion for user:', userId);
 
       const userRef = doc(db, 'loginIDs', userId);
       await updateDoc(userRef, {
         demographicsCompleted: true,
         demographicsCompletedAt: serverTimestamp(),
+        surveyCompleted: true, // MARK ENTIRE STUDY AS COMPLETED
+        completedAt: serverTimestamp(),
         lastUpdated: serverTimestamp(),
         demographicsData: surveyData,
       });
 
-      console.log('Demographics: Completion saved, redirecting to survey...');
+      console.log('Demographics: STUDY COMPLETED! Redirecting to completion page...');
 
       toast({
-        title: 'Demographics Completed',
-        description: 'Proceeding to main study...',
+        title: 'Study Completed!',
+        description: 'Thank you for your participation. Redirecting to completion page...',
         status: 'success',
-        duration: 2000,
+        duration: 3000,
       });
 
-      setTimeout(() => navigate('/survey'), 1000);
+      setTimeout(() => navigate('/completion'), 2000);
+      
     } catch (err) {
-      console.error('Error saving completion:', err);
+      console.error('Error saving demographics completion:', err);
       setError(err.message);
       toast({
         title: 'Error',
@@ -121,7 +144,7 @@ const Demographics = () => {
   }, [navigate, toast, processingCompletion]);
 
   const handleNextButtonClick = async () => {
-    console.log('Demographics: Next button clicked - completing survey');
+    console.log('Demographics: Manual next button clicked - completing entire study');
     setDemographicsCompleted(true);
     await finalizeCompletion({ type: 'manual_next_button' });
   };
@@ -201,13 +224,13 @@ const Demographics = () => {
 
         // Handle last question reached
         if (isLastQuestionSignal) {
-          console.log('Demographics: Last question reached - enabling next button');
+          console.log('Demographics: Last question reached - enabling completion');
           setLastQuestionReached(true);
         }
 
-        // Handle completion
+        // Handle completion - FINAL STEP OF ENTIRE STUDY
         if (isCompletionSignal) {
-          console.log('Demographics: Completion signal detected from Qualtrics!');
+          console.log('Demographics: FINAL completion signal detected from Qualtrics!');
           setDemographicsCompleted(true);
           finalizeCompletion(messageData);
         }
@@ -222,7 +245,7 @@ const Demographics = () => {
       }
     };
 
-    console.log('Demographics: Setting up message listener');
+    console.log('Demographics: Setting up message listener for FINAL step');
     window.addEventListener('message', handleMessage);
     
     return () => {
@@ -250,7 +273,7 @@ const Demographics = () => {
                      text.includes('finished') ||
                      text.includes('submission successful')) &&
                     text.length < 200) {
-                  console.log('Demographics: Completion detected via thank you message');
+                  console.log('Demographics: FINAL completion detected via thank you message');
                   setDemographicsCompleted(true);
                   finalizeCompletion({ type: 'thank_you_detection', text: text });
                   return;
@@ -258,13 +281,11 @@ const Demographics = () => {
               }
 
               // Check for last question indicators
-              // Look for "Prefer not to say" option which is typically the last question
               const preferNotToSayElements = doc.querySelectorAll('*');
               for (let element of preferNotToSayElements) {
                 const text = element.textContent?.toLowerCase() || '';
                 if (text.includes('prefer not to say') && 
-                    element.type === 'checkbox' || 
-                    element.type === 'radio') {
+                    (element.type === 'checkbox' || element.type === 'radio')) {
                   console.log('Demographics: Last question detected (prefer not to say option found)');
                   setLastQuestionReached(true);
                   break;
@@ -297,11 +318,11 @@ const Demographics = () => {
                 setLastQuestionReached(true);
               }
 
-              // If we detect any answer selection on what appears to be the last question, enable next
+              // If we detect any answer selection on what appears to be the last question, enable completion
               if (lastQuestionReached || hasIncomeQuestion) {
                 const radioInputs = doc.querySelectorAll('input[type="radio"]:checked, input[type="checkbox"]:checked');
                 if (radioInputs.length > 0) {
-                  console.log('Demographics: Answer selected on last question - auto-completing');
+                  console.log('Demographics: Answer selected on last question - auto-completing FINAL step');
                   // Small delay to ensure the answer is registered
                   setTimeout(() => {
                     setDemographicsCompleted(true);
@@ -326,9 +347,24 @@ const Demographics = () => {
   const generateQualtricsUrl = () => {
     const baseUrl = 'https://georgetown.az1.qualtrics.com/jfe/form/SV_0lcUfUbcn7vo7qe';
     const userId = sessionStorage.getItem('userLoginId') || 'unknown';
+    const prolificPid = sessionStorage.getItem('prolificPid') || 'TEST_USER';
+    const studyId = sessionStorage.getItem('studyId') || 'unknown';
+    const sessionId = sessionStorage.getItem('sessionId') || 'unknown';
+    const isTestMode = sessionStorage.getItem('testMode') === 'true';
     
     const params = new URLSearchParams({
-      user_id: userId,
+      // PROLIFIC DATA - Captured at the end now
+      PROLIFIC_PID: prolificPid,
+      STUDY_ID: studyId,
+      SESSION_ID: sessionId,
+      
+      // LINKING DATA
+      loginID: userId,
+      survey_type: 'demographics_final',
+      is_test_mode: isTestMode ? 'true' : 'false',
+      entry_timestamp: new Date().toISOString(),
+      
+      // CONTROL PARAMETERS
       embedded: 'true',
       source: 'react_app',
       completion_redirect: 'false',
@@ -339,7 +375,7 @@ const Demographics = () => {
   };
 
   const handleIframeLoad = () => {
-    console.log('Demographics: Iframe loaded');
+    console.log('Demographics: Iframe loaded for FINAL step');
     setSurveyLoading(false);
     setQualtricsLoaded(true);
 
@@ -366,7 +402,7 @@ const Demographics = () => {
                   });
                 }
 
-                // Function to hide the thank you page and trigger completion
+                // Function to hide the thank you page and trigger FINAL completion
                 function handleThankYouPage() {
                   const thankYouMessages = document.querySelectorAll('*');
                   for (let element of thankYouMessages) {
@@ -375,16 +411,16 @@ const Demographics = () => {
                         text.includes('your response has been recorded') ||
                         text.includes('thank you for your time')) {
                       
-                      console.log('Thank you page detected - hiding and completing');
+                      console.log('FINAL thank you page detected - hiding and completing ENTIRE STUDY');
                       
                       // Hide the thank you page
                       document.body.style.display = 'none';
                       
-                      // Immediately signal completion to parent
+                      // Immediately signal FINAL completion to parent
                       parent.postMessage({
                         type: 'demographics_completed',
                         source: 'thank_you_page_bypass',
-                        message: 'Survey completed, bypassing thank you page'
+                        message: 'FINAL demographics completed, entire study done'
                       }, '*');
                       
                       return true;
@@ -417,7 +453,7 @@ const Demographics = () => {
                           
                           // Detect income question (last question)
                           if (text.includes('income') && text.includes('past 12 months')) {
-                            console.log('Last question (income) detected');
+                            console.log('FINAL question (income) detected');
                             lastQuestionAnswered = false; // Reset flag
                             parent.postMessage({
                               type: 'last_question',
@@ -442,7 +478,7 @@ const Demographics = () => {
                   if (target.type === 'radio' || target.type === 'checkbox') {
                     const questionText = document.body.textContent.toLowerCase();
                     if (questionText.includes('income') && questionText.includes('past 12 months')) {
-                      console.log('Answer selected on income question');
+                      console.log('Answer selected on FINAL income question');
                       lastQuestionAnswered = true;
                     }
                   }
@@ -461,7 +497,7 @@ const Demographics = () => {
                        target.textContent.toLowerCase().includes('submit')) &&
                       lastQuestionAnswered) {
                     
-                    console.log('Submit button clicked on last question - will bypass thank you page');
+                    console.log('Submit button clicked on FINAL question - will bypass thank you page');
                     submitButtonClicked = true;
                     
                     // Set a timer to catch the thank you page and bypass it
@@ -470,8 +506,8 @@ const Demographics = () => {
                         return;
                       }
                       
-                      // If thank you page didn't appear, still complete the survey
-                      console.log('Completing survey after submit button click');
+                      // If thank you page didn't appear, still complete the FINAL survey
+                      console.log('Completing FINAL demographics after submit button click');
                       parent.postMessage({
                         type: 'demographics_completed',
                         source: 'submit_button_click'
@@ -483,7 +519,7 @@ const Demographics = () => {
                 // Form submission detection
                 document.addEventListener('submit', function(e) {
                   if (lastQuestionAnswered) {
-                    console.log('Form submitted on last question - bypassing thank you page');
+                    console.log('Form submitted on FINAL question - bypassing thank you page');
                     
                     // Prevent default if possible to avoid thank you page
                     try {
@@ -516,7 +552,7 @@ const Demographics = () => {
                 }, 1000);
               `;
               doc.head.appendChild(script);
-              console.log('Demographics: Enhanced detection script injected');
+              console.log('Demographics: Enhanced detection script injected for FINAL step');
             }
           } catch (error) {
             console.log('Could not inject script (cross-origin):', error);
@@ -528,20 +564,20 @@ const Demographics = () => {
     }
   };
 
-  // Auto-complete timer (backup)
+  // Auto-complete timer (backup) - shorter for final step
   useEffect(() => {
     if (qualtricsLoaded && !demographicsCompleted) {
       const autoCompleteTimer = setTimeout(() => {
-        console.log('Demographics: Auto-completion timer triggered');
+        console.log('Demographics: Auto-completion timer triggered for FINAL step');
         toast({
-          title: 'Survey Time Limit',
-          description: 'Proceeding to main study...',
+          title: 'Completing Study',
+          description: 'Finalizing your participation...',
           status: 'info',
           duration: 3000,
         });
         setDemographicsCompleted(true);
         finalizeCompletion({ type: 'timeout' });
-      }, 8 * 60 * 1000); // 8 minutes
+      }, 10 * 60 * 1000); // 10 minutes for final step
 
       return () => clearTimeout(autoCompleteTimer);
     }
@@ -552,7 +588,7 @@ const Demographics = () => {
       <Flex justify="center" align="center" minH="100vh">
         <VStack spacing={4}>
           <Spinner size="xl" color="blue.500" />
-          <Text>Loading...</Text>
+          <Text>Loading final step...</Text>
         </VStack>
       </Flex>
     );
@@ -575,10 +611,10 @@ const Demographics = () => {
       <Box bg="white" borderBottom="1px solid" borderColor="gray.200" py={4}>
         <Container maxW="4xl">
           <VStack spacing={2}>
-            <Heading>Demographics Survey</Heading>
+            <Heading>Final Demographics Survey</Heading>
             <HStack spacing={2}>
-              <Badge colorScheme="blue">Step 2 of 3</Badge>
-              <Badge colorScheme="gray">Consent → Demographics → Main Study</Badge>
+              <Badge colorScheme="green">Final Step</Badge>
+              <Badge colorScheme="gray">Consent → Main Study → Demographics</Badge>
             </HStack>
           </VStack>
         </Container>
@@ -586,10 +622,18 @@ const Demographics = () => {
 
       <Container maxW="4xl" py={6}>
         <VStack spacing={6}>
+          <Alert status="success" borderRadius="md">
+            <AlertIcon />
+            <Box>
+              <Text fontWeight="medium">Image Evaluation Complete! 🎉</Text>
+              <Text fontSize="sm">Please complete this final demographics survey to finish the study.</Text>
+            </Box>
+          </Alert>
+
           <Card h="600px">
             <CardHeader>
               <HStack justify="space-between">
-                <Text fontSize="lg" fontWeight="bold">📊 Demographics Survey</Text>
+                <Text fontSize="lg" fontWeight="bold">📊 Final Demographics Survey</Text>
                 {surveyLoading && <Spinner size="sm" />}
                 {qualtricsLoaded && !surveyLoading && (
                   <Badge colorScheme="green">Survey Loaded</Badge>
@@ -605,9 +649,9 @@ const Demographics = () => {
                   <Flex position="absolute" inset="0" bg="white" zIndex={10} align="center" justify="center">
                     <VStack spacing={3}>
                       <Spinner size="lg" color="blue.500" />
-                      <Text>Loading survey...</Text>
+                      <Text>Loading final survey...</Text>
                       <Text fontSize="sm" color="gray.600">
-                        Please wait while the demographics survey loads
+                        Almost done! Just a few quick questions.
                       </Text>
                     </VStack>
                   </Flex>
@@ -619,7 +663,7 @@ const Demographics = () => {
                   height="100%"
                   frameBorder="0"
                   onLoad={handleIframeLoad}
-                  title="Demographics Survey"
+                  title="Final Demographics Survey"
                   style={{ 
                     border: 0, 
                     borderRadius: '0 0 8px 8px',
@@ -637,16 +681,16 @@ const Demographics = () => {
                   <VStack spacing={3}>
                     <Alert status="success">
                       <AlertIcon />
-                      Demographics survey completed successfully!
+                      Study completed successfully! Thank you for your participation.
                     </Alert>
                     <Button
-                      colorScheme="blue"
+                      colorScheme="green"
                       size="lg"
-                      onClick={() => navigate('/survey')}
+                      onClick={() => navigate('/completion')}
                       isLoading={processingCompletion}
-                      loadingText="Saving..."
+                      loadingText="Finalizing..."
                     >
-                      Continue to Main Study →
+                      Continue to Completion →
                     </Button>
                   </VStack>
                 ) : (
@@ -655,20 +699,22 @@ const Demographics = () => {
                       <VStack spacing={3}>
                         <Alert status="info">
                           <AlertIcon />
-                          You've reached the final question! The survey will automatically advance when you make your selection.
+                          You've reached the final question! The study will complete automatically when you make your selection.
                         </Alert>
                         <Button 
-                          colorScheme="blue" 
+                          colorScheme="green" 
                           size="lg" 
                           onClick={handleNextButtonClick}
+                          isLoading={processingCompletion}
+                          loadingText="Completing..."
                         >
-                          Continue to Main Study →
+                          Complete Study →
                         </Button>
                       </VStack>
                     ) : (
                       <Alert status="info">
                         <AlertIcon />
-                        Please complete the demographics survey. The page will automatically advance when finished.
+                        Please complete the final demographics survey. The study will automatically complete when finished.
                       </Alert>
                     )}
                   </VStack>
