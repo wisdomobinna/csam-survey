@@ -1,11 +1,11 @@
-// src/pages/Login.js - Updated with Automatic Image Assignment for Auto-Generated Users
-import React, { useState, useEffect } from 'react';
+// src/pages/Login.js - Updated with Enhanced Assignment System Integration (Cleaned)
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
-import { ref, getDownloadURL } from 'firebase/storage';
-import { db, auth, storage } from '../firebase/config';
+import { db, auth } from '../firebase/config';
 import { signInAnonymously } from 'firebase/auth';
 import { checkSurveyCompletion } from '../utils/assessment-tracking';
+import { getSimpleConcurrentAssignment, getSimpleConcurrentCapacity, getFallbackAssignment } from '../utils/simpleConcurrentAssignment';
 import {
   Box,
   Button,
@@ -36,9 +36,8 @@ import {
   HStack,
   Spinner,
   Progress,
-  Divider,
 } from '@chakra-ui/react';
-import { Info, Image as ImageIcon, CheckCircle, Users, Shield, ExternalLink, TestTube, Settings } from 'lucide-react';
+import { Info, Image as ImageIcon, CheckCircle, Users, Shield, TestTube } from 'lucide-react';
 
 const Login = () => {
   const [loginId, setLoginId] = useState('');
@@ -56,149 +55,186 @@ const Login = () => {
   const [searchParams] = useSearchParams();
   const totalSteps = 4;
 
-  console.log('Login: Environment check:');
-  console.log('API Key from env:', process.env.REACT_APP_FIREBASE_API_KEY);
-  console.log('Project ID from env:', process.env.REACT_APP_FIREBASE_PROJECT_ID);
+  // ENHANCED: Check assignment capacity and display warnings
+  const checkAndDisplayCapacity = useCallback(async () => {
+    try {
+      const capacity = await getSimpleConcurrentCapacity();
+      
+      if (!capacity.canAssign) {
+        toast({
+          title: 'Study Capacity Warning',
+          description: capacity.reason,
+          status: 'warning',
+          duration: 10000,
+        });
+        return false;
+      }
+      
+      if (capacity.estimatedCapacity < 50) {
+        toast({
+          title: 'Study Nearing Capacity',
+          description: `Approximately ${capacity.estimatedCapacity} participant slots remaining`,
+          status: 'info',
+          duration: 5000,
+        });
+      }
+      
+      return true;
+    } catch (error) {
+      console.error('Error checking capacity:', error);
+      return true; // Allow to proceed if check fails
+    }
+  }, [toast]);
 
-  useEffect(() => {
-    handleProlificEntry();
+  // ENHANCED: Use balanced assignment system with simple concurrency protection
+  const assignImagesToUser = useCallback(async (userId, imagesPerUser = 10) => {
+    try {
+      console.log(`Login: Starting concurrent-safe assignment for ${userId}...`);
+      
+      // Try the concurrent system first
+      try {
+        const assignedImages = await getSimpleConcurrentAssignment(userId, imagesPerUser);
+        console.log(`Login: ✅ Concurrent assignment successful: ${assignedImages.length} images`);
+        return assignedImages;
+      } catch (concurrentError) {
+        console.warn(`Login: Concurrent assignment failed, using fallback:`, concurrentError.message);
+        
+        // Fallback to direct assignment
+        const assignedImages = await getFallbackAssignment(userId, imagesPerUser);
+        console.log(`Login: ✅ Fallback assignment successful: ${assignedImages.length} images`);
+        return assignedImages;
+      }
+      
+    } catch (error) {
+      console.error('Login: Error in assignment:', error);
+      throw error;
+    }
   }, []);
 
-  // NEW: Get available images for assignment (similar to AdminDashboard)
-  const getAvailableImagesForAssignment = async () => {
+  // ENHANCED: Create or update user record with enhanced assignment system
+  const createOrUpdateUserRecord = useCallback(async (userId, prolificData = null, isTest = false) => {
     try {
-      console.log('Login: Checking available images in Firebase Storage...');
+      console.log('Login: Creating/updating user record for ID:', userId, { isTest });
       
-      // Test sample images to verify storage structure
-      const testImages = [
-        { path: 'set1/1.png', set: 'set1' },
-        { path: 'set1/100.png', set: 'set1' },
-        { path: 'set2/1201.png', set: 'set2' },
-        { path: 'set2/1300.png', set: 'set2' }
-      ];
+      const userRef = doc(db, 'loginIDs', userId);
       
-      let set1Exists = false;
-      let set2Exists = false;
+      // Check if user already exists
+      const existingDoc = await getDoc(userRef);
       
-      for (const testImg of testImages) {
-        try {
-          const imageRef = ref(storage, testImg.path);
-          await getDownloadURL(imageRef);
-          if (testImg.set === 'set1') {
-            set1Exists = true;
-          } else {
-            set2Exists = true;
-          }
-          console.log(`Login: ✓ Found ${testImg.path}`);
-        } catch (error) {
-          console.warn(`Login: ✗ Test image ${testImg.path} not found`);
-        }
-      }
-      
-      if (!set1Exists && !set2Exists) {
-        throw new Error('No image sets found in Firebase Storage. Please upload images first.');
-      }
-      
-      const availableImages = [];
-      
-      // Generate image objects for verified sets
-      if (set1Exists) {
-        console.log('Login: Adding set1 images (1-1200)...');
-        for (let i = 1; i <= 1200; i++) {
-          availableImages.push({
-            id: `set1_${i}`,
-            name: `${i}.png`,
-            set: 'set1',
-            path: `set1/${i}.png`,
-            storageRef: `set1/${i}.png`
-          });
-        }
-      }
-      
-      if (set2Exists) {
-        console.log('Login: Adding set2 images (1201-2400)...');
-        for (let i = 1201; i <= 2400; i++) {
-          availableImages.push({
-            id: `set2_${i}`,
-            name: `${i}.png`,
-            set: 'set2',
-            path: `set2/${i}.png`,
-            storageRef: `set2/${i}.png`
-          });
-        }
-      }
-      
-      // Shuffle for random assignment
-      const shuffled = availableImages.sort(() => Math.random() - 0.5);
-      
-      console.log(`Login: ✓ Generated ${shuffled.length} available images for assignment`);
-      
-      return shuffled;
-      
-    } catch (error) {
-      console.error('Login: Error getting available images:', error);
-      throw error;
-    }
-  };
-
-  // NEW: Assign images to a user
-  const assignImagesToUser = async (availableImages, imagesPerUser = 10) => {
-    try {
-      const set1Images = availableImages.filter(img => img.set === 'set1');
-      const set2Images = availableImages.filter(img => img.set === 'set2');
-      
-      const assignedImages = [];
-      
-      if (set1Images.length > 0 && set2Images.length > 0) {
-        // Both sets available - assign balanced (5 from each)
-        const imagesPerSet = Math.floor(imagesPerUser / 2);
+      if (existingDoc.exists()) {
+        console.log('Login: User already exists, updating login time');
+        const existingData = existingDoc.data();
         
-        // Get random starting points
-        const set1StartIndex = Math.floor(Math.random() * Math.max(1, set1Images.length - imagesPerSet));
-        const set2StartIndex = Math.floor(Math.random() * Math.max(1, set2Images.length - imagesPerSet));
+        // Update last login time
+        await setDoc(userRef, {
+          ...existingData,
+          lastLogin: serverTimestamp(),
+          lastReturnVisit: serverTimestamp(),
+          returnCount: (existingData.returnCount || 0) + 1
+        }, { merge: true });
         
-        // Add images from set1
-        for (let j = 0; j < imagesPerSet && j + set1StartIndex < set1Images.length; j++) {
-          assignedImages.push(set1Images[set1StartIndex + j]);
-        }
-        
-        // Add images from set2
-        for (let j = 0; j < imagesPerSet && j + set2StartIndex < set2Images.length; j++) {
-          assignedImages.push(set2Images[set2StartIndex + j]);
-        }
-        
-        // If we need one more image (odd number), pick randomly
-        if (assignedImages.length < imagesPerUser) {
-          const remainingSet = Math.random() < 0.5 ? set1Images : set2Images;
-          const usedIds = new Set(assignedImages.map(img => img.id));
-          const unusedImage = remainingSet.find(img => !usedIds.has(img.id));
-          if (unusedImage) {
-            assignedImages.push(unusedImage);
-          }
-        }
+        return { success: true, userId, userData: existingData };
       } else {
-        // Only one set available - assign from available set
-        const availableSet = set1Images.length > 0 ? set1Images : set2Images;
-        const startIndex = Math.floor(Math.random() * Math.max(1, availableSet.length - imagesPerUser));
+        console.log('Login: Creating new user record with enhanced balanced assignment');
         
-        for (let j = 0; j < imagesPerUser && j + startIndex < availableSet.length; j++) {
-          assignedImages.push(availableSet[startIndex + j]);
+        // ENHANCED: Check assignment capacity before proceeding
+        let assignedImages = [];
+        try {
+          const capacity = await getSimpleConcurrentCapacity();
+          
+          if (!capacity.canAssign) {
+            // Return error but don't fail completely - let them proceed without images
+            console.warn('Login: Assignment capacity exceeded, creating user without images');
+            toast({
+              title: 'Study at Capacity',
+              description: 'This study has reached its participant limit. Please contact the researchers.',
+              status: 'warning',
+              duration: 8000,
+            });
+            assignedImages = []; // Empty assignment
+          } else {
+            // Assign images using enhanced system
+            assignedImages = await assignImagesToUser(userId, 10);
+            console.log(`Login: Successfully assigned ${assignedImages.length} images to new user`);
+          }
+        } catch (imageError) {
+          console.error('Login: Error assigning images:', imageError);
+          // Continue without images but show warning
+          assignedImages = [];
+          toast({
+            title: 'Image Assignment Warning',
+            description: 'Could not assign images. Please contact support if this continues.',
+            status: 'warning',
+            duration: 5000,
+          });
         }
+        
+        // Create user document with assigned images (or empty if assignment failed)
+        const userData = {
+          internalUserId: userId,
+          displayId: userId,
+          assignedImages: assignedImages, // May be empty if capacity exceeded
+          completedImages: 0,
+          completedImageIds: [],
+          totalImages: assignedImages.length,
+          surveyCompleted: false,
+          hasConsented: false,
+          demographicsCompleted: false,
+          createdAt: serverTimestamp(),
+          lastLogin: serverTimestamp(),
+          isActive: true,
+          source: isTest ? 'test' : (prolificData ? 'prolific' : 'direct'),
+          userAgent: navigator.userAgent.substring(0, 200),
+          ipInfo: {
+            timestamp: new Date().toISOString(),
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+          },
+          // ENHANCED: Assignment details
+          imageAssignmentStatus: assignedImages.length > 0 ? 'assigned' : 'failed',
+          autoAssignedAt: serverTimestamp(),
+          autoAssignmentDetails: {
+            imagesAssigned: assignedImages.length,
+            set1Count: assignedImages.filter(img => img.set === 'set1').length,
+            set2Count: assignedImages.filter(img => img.set === 'set2').length,
+            assignedDuringLogin: true,
+            assignmentTimestamp: new Date().toISOString(),
+            assignmentSystem: 'enhanced_balanced_5_limit',
+            mixedOrder: assignedImages.length > 0 ? assignedImages.map(img => img.set).join(' → ') : 'none'
+          }
+        };
+        
+        // Add Prolific data if available
+        if (prolificData) {
+          userData.prolificData = {
+            prolificPid: prolificData.prolificPid,
+            studyId: prolificData.studyId,
+            sessionId: prolificData.sessionId,
+            detectedAt: prolificData.detectedAt,
+            referrer: prolificData.referrer,
+            userAgent: prolificData.userAgent,
+            qualtricsUserId: prolificData.prolificPid,
+            validated: true,
+            source: isTest ? 'test_redirect' : 'prolific_redirect',
+            isTestUser: isTest
+          };
+          
+          // Store the Prolific PID at the top level for easy access
+          userData.prolificPid = prolificData.prolificPid;
+        }
+        
+        await setDoc(userRef, userData);
+        
+        console.log(`Login: User ${userId} record created successfully with ${assignedImages.length} assigned images`);
+        
+        return { success: true, userId, userData };
       }
-      
-      console.log(`Login: Assigned ${assignedImages.length} images:`);
-      console.log(`  - Set1: ${assignedImages.filter(img => img.set === 'set1').length} images`);
-      console.log(`  - Set2: ${assignedImages.filter(img => img.set === 'set2').length} images`);
-      
-      return assignedImages;
-      
     } catch (error) {
-      console.error('Login: Error assigning images:', error);
+      console.error('Login: Error creating/updating user record:', error);
       throw error;
     }
-  };
+  }, [assignImagesToUser, toast]);
 
-  const handleProlificEntry = async () => {
+  const handleProlificEntry = useCallback(async () => {
     try {
       // Check for Prolific parameters in URL
       const prolificPid = searchParams.get('PROLIFIC_PID');
@@ -248,6 +284,10 @@ const Login = () => {
         
         console.log('Login: Prolific mode activated, proceeding with auto-login');
         
+        // ENHANCED: Check capacity before proceeding with auto-login
+        console.log('Login: Checking study capacity for Prolific user...');
+        await checkAndDisplayCapacity();
+        
         // Proceed with automatic login for Prolific users
         await handleAutomaticProlificLogin(prolificInfo);
         
@@ -272,7 +312,11 @@ const Login = () => {
       console.error('Login: Error handling Prolific entry:', error);
       setError('Error processing your entry. Please refresh and try again.');
     }
-  };
+  }, [searchParams, checkAndDisplayCapacity, navigate]);
+
+  useEffect(() => {
+    handleProlificEntry();
+  }, [handleProlificEntry]);
 
   const handleAutomaticProlificLogin = async (prolificInfo) => {
     try {
@@ -299,7 +343,7 @@ const Login = () => {
         }
       }
       
-      // UPDATED: Create user record with automatic image assignment
+      // ENHANCED: Create user record with automatic image assignment
       const result = await createOrUpdateUserRecord(loginId, prolificInfo, prolificInfo.isTestUser);
       
       // Store session data
@@ -330,7 +374,9 @@ const Login = () => {
       
       toast({
         title: 'Welcome!',
-        description: prolificInfo.isTestUser ? 'Test session loaded successfully' : 'Prolific study session loaded successfully',
+        description: prolificInfo.isTestUser ? 
+          `Test session loaded successfully (${result.userData.totalImages} images assigned)` : 
+          `Prolific study session loaded successfully (${result.userData.totalImages} images assigned)`,
         status: 'success',
         duration: 2000,
       });
@@ -405,107 +451,6 @@ const Login = () => {
     }
   };
 
-  // UPDATED: Create or update user record with automatic image assignment
-  const createOrUpdateUserRecord = async (userId, prolificData = null, isTest = false) => {
-    try {
-      console.log('Login: Creating/updating user record for ID:', userId, { isTest });
-      
-      const userRef = doc(db, 'loginIDs', userId);
-      
-      // Check if user already exists
-      const existingDoc = await getDoc(userRef);
-      
-      if (existingDoc.exists()) {
-        console.log('Login: User already exists, updating login time');
-        const existingData = existingDoc.data();
-        
-        // Update last login time
-        await setDoc(userRef, {
-          ...existingData,
-          lastLogin: serverTimestamp(),
-          lastReturnVisit: serverTimestamp(),
-          returnCount: (existingData.returnCount || 0) + 1
-        }, { merge: true });
-        
-        return { success: true, userId, userData: existingData };
-      } else {
-        console.log('Login: Creating new user record with automatic image assignment');
-        
-        // NEW: Get available images and assign them
-        let assignedImages = [];
-        try {
-          const availableImages = await getAvailableImagesForAssignment();
-          assignedImages = await assignImagesToUser(availableImages, 10); // Assign 10 images
-          console.log(`Login: Successfully assigned ${assignedImages.length} images to new user`);
-        } catch (imageError) {
-          console.error('Login: Error assigning images:', imageError);
-          // Continue without images - will show 0 images assigned
-          assignedImages = [];
-        }
-        
-        // Create user document with assigned images
-        const userData = {
-          internalUserId: userId,
-          displayId: userId,
-          assignedImages: assignedImages, // NEW: Include assigned images
-          completedImages: 0,
-          completedImageIds: [],
-          totalImages: assignedImages.length, // NEW: Set total images
-          surveyCompleted: false,
-          hasConsented: false,
-          demographicsCompleted: false,
-          createdAt: serverTimestamp(),
-          lastLogin: serverTimestamp(),
-          isActive: true,
-          source: isTest ? 'test' : (prolificData ? 'prolific' : 'direct'),
-          userAgent: navigator.userAgent.substring(0, 200),
-          ipInfo: {
-            timestamp: new Date().toISOString(),
-            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
-          },
-          // NEW: Image assignment details
-          imageAssignmentStatus: assignedImages.length > 0 ? 'assigned' : 'failed',
-          autoAssignedAt: serverTimestamp(),
-          autoAssignmentDetails: {
-            imagesAssigned: assignedImages.length,
-            set1Count: assignedImages.filter(img => img.set === 'set1').length,
-            set2Count: assignedImages.filter(img => img.set === 'set2').length,
-            assignedDuringLogin: true,
-            assignmentTimestamp: new Date().toISOString()
-          }
-        };
-        
-        // Add Prolific data if available
-        if (prolificData) {
-          userData.prolificData = {
-            prolificPid: prolificData.prolificPid,
-            studyId: prolificData.studyId,
-            sessionId: prolificData.sessionId,
-            detectedAt: prolificData.detectedAt,
-            referrer: prolificData.referrer,
-            userAgent: prolificData.userAgent,
-            qualtricsUserId: prolificData.prolificPid,
-            validated: true,
-            source: isTest ? 'test_redirect' : 'prolific_redirect',
-            isTestUser: isTest
-          };
-          
-          // Store the Prolific PID at the top level for easy access
-          userData.prolificPid = prolificData.prolificPid;
-        }
-        
-        await setDoc(userRef, userData);
-        
-        console.log(`Login: User ${userId} record created successfully with ${assignedImages.length} assigned images`);
-        
-        return { success: true, userId, userData };
-      }
-    } catch (error) {
-      console.error('Login: Error creating/updating user record:', error);
-      throw error;
-    }
-  };
-
   const handleManualLogin = async (e) => {
     e.preventDefault();
     setError('');
@@ -572,7 +517,7 @@ const Login = () => {
         // Generate login ID for test user
         const loginIdForTest = `login_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         
-        // Create user record with automatic image assignment
+        // ENHANCED: Create user record with automatic image assignment
         const result = await createOrUpdateUserRecord(loginIdForTest, testProlificData, true);
         
         // Store session data
@@ -647,7 +592,7 @@ const Login = () => {
         // User doesn't exist - this might be a new direct user, create with images
         const directLoginId = `login_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         
-        // Create user record with automatic image assignment
+        // ENHANCED: Create user record with automatic image assignment
         const result = await createOrUpdateUserRecord(directLoginId, null, false);
         
         // Store session data
@@ -681,64 +626,6 @@ const Login = () => {
         return (
           <VStack spacing={4} align="start">
             <Flex align="center" gap={2}>
-              <Icon as={Info} color="blue.500" />
-              <Text fontSize="lg" fontWeight="bold">Welcome to the Image Evaluation Study</Text>
-            </Flex>
-            <Text>
-              Thank you for participating in our research study on image perception and evaluation.
-              Your contribution is valuable to our understanding of visual content assessment.
-            </Text>
-            <Box p={4} bg="blue.50" borderRadius="md">
-              <Text fontWeight="medium" mb={2}>What you'll be doing:</Text>
-              <OrderedList spacing={2}>
-                <ListItem>Viewing 10 carefully selected images (5 from Set 1, 5 from Set 2)</ListItem>
-                <ListItem>Evaluating each image using provided rating scales</ListItem>
-                <ListItem>Providing your honest impressions and assessments</ListItem>
-                <ListItem>Taking approximately 15-20 minutes total</ListItem>
-              </OrderedList>
-            </Box>
-            <Alert status="info" size="sm">
-              <AlertIcon />
-              <Text fontSize="sm">All responses are anonymous and will be used solely for research purposes.</Text>
-            </Alert>
-          </VStack>
-        );
-
-      case 2:
-        return (
-          <VStack spacing={4} align="start">
-            <Flex align="center" gap={2}>
-              <Icon as={ImageIcon} color="green.500" />
-              <Text fontSize="lg" fontWeight="bold">Image Sets</Text>
-            </Flex>
-            <Text>
-              You will see images from two different sets, each representing different approaches 
-              to image collection and curation:
-            </Text>
-            <VStack spacing={3} align="start" w="full">
-              <HStack w="full">
-                <Badge colorScheme="blue" minW="80px" textAlign="center">Set 1</Badge>
-                <Text>1200 images - You'll see 5 randomly selected images</Text>
-              </HStack>
-              <HStack w="full">
-                <Badge colorScheme="green" minW="80px" textAlign="center">Set 2</Badge>
-                <Text>1200 images - You'll see 5 randomly selected images</Text>
-              </HStack>
-            </VStack>
-            <Box p={4} bg="yellow.50" borderRadius="md">
-              <Text color="yellow.800" fontSize="sm">
-                <strong>Note:</strong> Each image is shown to a maximum of 5 participants total, 
-                and you will never see the same image twice. This ensures balanced evaluation 
-                across our entire image dataset.
-              </Text>
-            </Box>
-          </VStack>
-        );
-
-      case 3:
-        return (
-          <VStack spacing={4} align="start">
-            <Flex align="center" gap={2}>
               <Icon as={CheckCircle} color="purple.500" />
               <Text fontSize="lg" fontWeight="bold">Evaluation Process</Text>
             </Flex>
@@ -761,10 +648,10 @@ const Login = () => {
                 <Text>Your progress is saved automatically after each image evaluation</Text>
               </ListItem>
             </OrderedList>
-            <Box p={4} bg="green.50" borderRadius="md">
-              <Text color="green.800" fontSize="sm">
-                <strong>Privacy:</strong> Your responses are completely anonymous. We only track 
-                completion status to ensure proper compensation through Prolific.
+            <Box p={4} bg="purple.50" borderRadius="md">
+              <Text color="purple.800" fontSize="sm">
+                <strong>Privacy & Quality:</strong> Your responses are completely anonymous. The enhanced 
+                assignment system ensures high-quality data by limiting each image to 5 evaluations maximum.
               </Text>
             </Box>
           </VStack>
@@ -784,10 +671,12 @@ const Login = () => {
               <VStack align="start" spacing={2}>
                 <Text fontSize="sm"><strong>✓</strong> You have 10 unique images to evaluate</Text>
                 <Text fontSize="sm"><strong>✓</strong> 5 images from Set 1, 5 images from Set 2</Text>
+                <Text fontSize="sm"><strong>✓</strong> Mixed presentation order for unbiased evaluation</Text>
                 <Text fontSize="sm"><strong>✓</strong> Your progress is saved automatically</Text>
                 <Text fontSize="sm"><strong>✓</strong> Estimated time: 15-20 minutes</Text>
                 <Text fontSize="sm"><strong>✓</strong> You can take breaks between images</Text>
                 <Text fontSize="sm"><strong>✓</strong> Your responses contribute to important research</Text>
+                <Text fontSize="sm"><strong>✨</strong> Enhanced system ensures balanced data collection</Text>
               </VStack>
             </Box>
             {(prolificMode || testMode) && (
@@ -800,8 +689,8 @@ const Login = () => {
                     </Text>
                     <Text fontSize="xs" color="gray.600">
                       {testMode 
-                        ? 'This is a test session for system validation'
-                        : 'Your participation will be tracked for proper compensation'
+                        ? 'This is a test session with enhanced assignment system'
+                        : 'Your participation will be tracked for proper compensation using enhanced assignment'
                       }
                     </Text>
                   </VStack>
@@ -810,7 +699,7 @@ const Login = () => {
             )}
             <Text fontSize="sm" color="gray.600" fontStyle="italic">
               {prolificMode 
-                ? 'The study will begin automatically, or use the "Start Study" button below.'
+                ? 'The study will begin automatically with enhanced image assignment, or use the "Start Study" button below.'
                 : 'Click "Start Study" below to begin your evaluation, or use the "Previous" button to review any information above.'
               }
             </Text>
@@ -830,13 +719,18 @@ const Login = () => {
           <Spinner size="xl" color="blue.500" />
           <Text>
             {autoLoginInProgress 
-              ? 'Setting up your Prolific study session...' 
+              ? 'Setting up your enhanced Prolific study session...' 
               : 'Validating your session...'
             }
           </Text>
           {prolificData && (
             <Text fontSize="sm" color="gray.600">
               Participant ID: {prolificData.prolificPid?.substring(0, 8)}...
+            </Text>
+          )}
+          {autoLoginInProgress && (
+            <Text fontSize="xs" color="blue.600">
+              Enhanced assignment system: Assigning balanced image set...
             </Text>
           )}
         </VStack>
@@ -851,11 +745,14 @@ const Login = () => {
           <CardHeader>
             <VStack spacing={2}>
               <Heading size="lg" textAlign="center">
-                Image Evaluation Study
+                Enhanced Image Evaluation Study
               </Heading>
               <Text fontSize="sm" color="gray.600" textAlign="center">
                 Research Study on Visual Content Assessment
               </Text>
+              <Badge colorScheme="green" px={2} py={1}>
+                ✨ Enhanced Assignment System
+              </Badge>
               {prolificMode && !testMode && (
                 <VStack spacing={1}>
                   <Badge colorScheme="blue" px={3} py={1}>
@@ -929,21 +826,24 @@ const Login = () => {
                     size="lg"
                   >
                     {loginId === 'ADMIN' ? 'Access Admin Dashboard' : 
-                     loginId.startsWith('TEST') ? 'Begin Test Session' :
-                     'Begin Study'}
+                     loginId.startsWith('TEST') ? 'Begin Enhanced Test Session' :
+                     'Begin Enhanced Study'}
                   </Button>
 
                   {/* Instructions for direct entry */}
                   <Box p={4} bg="gray.50" borderRadius="md" w="full">
                     <VStack spacing={2}>
                       <Text fontSize="sm" fontWeight="medium" color="gray.700">
-                        Automatic Image Assignment
+                        ✨ Enhanced Automatic Image Assignment
                       </Text>
                       <Text fontSize="xs" color="gray.600" textAlign="center">
-                        ✓ New participants will automatically receive 10 random images (5 from each set)
+                        ✓ New participants automatically receive 10 balanced images (5 from each set)
                       </Text>
                       <Text fontSize="xs" color="gray.600" textAlign="center">
-                        ✓ Pre-assigned participant IDs will use their existing image assignments
+                        ✓ Each image shown to maximum 5 participants for optimal data quality
+                      </Text>
+                      <Text fontSize="xs" color="gray.600" textAlign="center">
+                        ✓ Pre-assigned participant IDs use their existing enhanced assignments
                       </Text>
                     </VStack>
                   </Box>
@@ -956,7 +856,7 @@ const Login = () => {
               <VStack spacing={6}>
                 <Box w="full">
                   <Text mb={2} fontWeight="medium">
-                    {testMode ? 'Test User ID' : 'Prolific Participant ID'}
+                    {testMode ? 'Enhanced Test User ID' : 'Prolific Participant ID'}
                   </Text>
                   <Input
                     type="text"
@@ -972,8 +872,8 @@ const Login = () => {
                   />
                   <Text fontSize="xs" color="gray.500" mt={1} textAlign="center">
                     {testMode 
-                      ? 'Test ID automatically detected - 10 images will be assigned'
-                      : 'ID automatically detected from Prolific redirect - 10 images will be assigned'
+                      ? 'Test ID detected - Enhanced assignment system will assign 10 balanced images'
+                      : 'ID detected from Prolific - Enhanced assignment system will assign 10 balanced images'
                     }
                   </Text>
                 </Box>
@@ -985,19 +885,22 @@ const Login = () => {
                   onClick={onOpen}
                   width="full"
                 >
-                  Study Information & Tutorial
+                  Enhanced Study Information & Tutorial
                 </Button>
 
                 <Box p={3} bg="green.50" borderRadius="md" w="full">
                   <VStack spacing={1}>
                     <Text fontSize="sm" fontWeight="medium" color="green.800">
-                      ✓ {testMode ? 'Test Session Ready' : 'Study Link Validated'}
+                      ✓ {testMode ? 'Enhanced Test Session Ready' : 'Enhanced Study Link Validated'}
                     </Text>
                     <Text fontSize="xs" color="green.600">
                       {testMode 
-                        ? 'Automatic login completed - 10 test images will be assigned'
-                        : 'Automatic login completed - 10 random images will be assigned'
+                        ? 'Enhanced auto-login completed - 10 balanced test images will be assigned'
+                        : 'Enhanced auto-login completed - 10 balanced images will be assigned (5 per set)'
                       }
+                    </Text>
+                    <Text fontSize="xs" color="green.600">
+                      ✨ 5-assignment limit per image ensures optimal data quality
                     </Text>
                   </VStack>
                 </Box>
@@ -1012,7 +915,7 @@ const Login = () => {
             <CardBody py={4}>
               <VStack spacing={3}>
                 <Text fontSize="sm" fontWeight="medium" color="gray.700">
-                  {testMode ? 'Test Session Information' : 'Study Information'}
+                  {testMode ? 'Enhanced Test Session Information' : 'Enhanced Study Information'}
                 </Text>
                 <HStack justify="space-between" w="full" fontSize="xs" color="gray.600">
                   <Text>Expected Duration:</Text>
@@ -1024,7 +927,15 @@ const Login = () => {
                 </HStack>
                 <HStack justify="space-between" w="full" fontSize="xs" color="gray.600">
                   <Text>Image Assignment:</Text>
-                  <Text fontWeight="medium">✓ Automatic random selection</Text>
+                  <Text fontWeight="medium">✨ Enhanced balanced selection</Text>
+                </HStack>
+                <HStack justify="space-between" w="full" fontSize="xs" color="gray.600">
+                  <Text>Assignment Limit:</Text>
+                  <Text fontWeight="medium">Maximum 5 participants per image</Text>
+                </HStack>
+                <HStack justify="space-between" w="full" fontSize="xs" color="gray.600">
+                  <Text>Presentation Order:</Text>
+                  <Text fontWeight="medium">Mixed (randomized from both sets)</Text>
                 </HStack>
                 <HStack justify="space-between" w="full" fontSize="xs" color="gray.600">
                   <Text>Compensation:</Text>
@@ -1035,7 +946,7 @@ const Login = () => {
                 {testMode && (
                   <HStack justify="space-between" w="full" fontSize="xs" color="orange.600">
                     <Text>Test Mode:</Text>
-                    <Text fontWeight="medium">Data marked for testing purposes</Text>
+                    <Text fontWeight="medium">Enhanced system validation</Text>
                   </HStack>
                 )}
               </VStack>
@@ -1044,7 +955,7 @@ const Login = () => {
         )}
       </Container>
 
-      {/* Tutorial Modal */}
+      {/* Enhanced Tutorial Modal */}
       <Modal
         isOpen={isOpen}
         onClose={() => {
@@ -1058,7 +969,7 @@ const Login = () => {
         <ModalContent>
           <ModalHeader>
             <VStack align="start" spacing={1}>
-              <Text>Study Information & Tutorial</Text>
+              <Text>Enhanced Study Information & Tutorial</Text>
               <HStack>
                 <Text fontSize="sm" color="gray.500">
                   Step {tutorialStep} of {totalSteps}
@@ -1069,6 +980,7 @@ const Login = () => {
                   colorScheme="blue"
                   w="100px"
                 />
+                <Badge colorScheme="green" size="sm">Enhanced System</Badge>
               </HStack>
             </VStack>
           </ModalHeader>
@@ -1103,7 +1015,7 @@ const Login = () => {
                 }}
                 leftIcon={<CheckCircle />}
               >
-                Ready to Start
+                Ready to Start Enhanced Study
               </Button>
             )}
           </ModalFooter>

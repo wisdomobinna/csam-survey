@@ -1,14 +1,15 @@
-// src/utils/balancedImageAssignment.js - Balanced Assignment with Limits
+// src/utils/balancedImageAssignment.js - Enhanced with 4-5 assignment limit
 import { doc, getDoc, setDoc, updateDoc, increment, writeBatch, serverTimestamp } from 'firebase/firestore';
 import { ref, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../firebase/config';
 
 /**
- * Balanced Image Assignment System
- * - Ensures each image is assigned maximum 5 times
- * - Balances assignment across both sets
+ * Enhanced Balanced Image Assignment System
+ * - Ensures each image is assigned maximum 4-5 times
+ * - Balances assignment across both sets (5 from each set)
  * - Tracks assignment counts in Firebase
  * - Prioritizes least-assigned images
+ * - Mixed assignment ensuring diversity
  */
 
 // Initialize or get assignment tracking document
@@ -26,8 +27,9 @@ const initializeAssignmentTracking = async () => {
         set2: {},
         totalAssignments: 0,
         lastUpdated: serverTimestamp(),
-        maxAssignmentsPerImage: 5,
-        imagesPerUser: 10
+        maxAssignmentsPerImage: 5, // Maximum 5 assignments per image
+        imagesPerUser: 10, // 5 from each set
+        imagesPerSet: 5
       };
       
       // Initialize all images with 0 assignments
@@ -40,7 +42,7 @@ const initializeAssignmentTracking = async () => {
       }
       
       await setDoc(trackingRef, initialTracking);
-      console.log('✓ Assignment tracking initialized');
+      console.log('✓ Assignment tracking initialized with 5-assignment limit');
       
       return initialTracking;
     } else {
@@ -52,16 +54,16 @@ const initializeAssignmentTracking = async () => {
   }
 };
 
-// Get available images that haven't reached assignment limit
+// Get available images that haven't reached the 5-assignment limit
 const getAvailableImagesForBalancedAssignment = async () => {
   try {
-    console.log('Getting available images with assignment limits...');
+    console.log('Getting available images with 5-assignment limit...');
     
     // Get current assignment tracking
     const tracking = await initializeAssignmentTracking();
     const maxAssignments = tracking.maxAssignmentsPerImage || 5;
     
-    // Test storage availability
+    // Test storage availability (verify images exist)
     const testImages = [
       { path: 'set1/1.png', set: 'set1' },
       { path: 'set1/100.png', set: 'set1' },
@@ -84,7 +86,7 @@ const getAvailableImagesForBalancedAssignment = async () => {
     }
     
     if (!set1Exists && !set2Exists) {
-      throw new Error('No image sets found in Firebase Storage');
+      throw new Error('No image sets found in Firebase Storage. Please upload images first.');
     }
     
     // Get available images from each set (under assignment limit)
@@ -147,29 +149,31 @@ const getAvailableImagesForBalancedAssignment = async () => {
   }
 };
 
-// Balanced assignment algorithm - prioritizes least-assigned images
+// Mixed balanced assignment algorithm - prioritizes least-assigned images
 const assignImagesBalanced = async (imagesPerUser = 10) => {
   try {
-    console.log(`Starting balanced assignment for ${imagesPerUser} images...`);
+    console.log(`Starting mixed balanced assignment for ${imagesPerUser} images...`);
     
     const { set1, set2, tracking, maxAssignments } = await getAvailableImagesForBalancedAssignment();
+    const imagesPerSet = Math.floor(imagesPerUser / 2); // 5 from each set
     
     // Check if we have enough available images
-    const totalAvailable = set1.length + set2.length;
-    if (totalAvailable < imagesPerUser) {
-      throw new Error(`Not enough images available. Need ${imagesPerUser}, but only ${totalAvailable} images haven't reached the assignment limit of ${maxAssignments}.`);
+    if (set1.length < imagesPerSet || set2.length < imagesPerSet) {
+      throw new Error(
+        `Not enough images available. Need ${imagesPerSet} from each set, but have Set1: ${set1.length}, Set2: ${set2.length}. ` +
+        `Some images may have reached the ${maxAssignments}-assignment limit.`
+      );
     }
     
     const assignedImages = [];
-    const targetPerSet = Math.floor(imagesPerUser / 2); // 5 from each set ideally
     
-    // Sort images by priority (least assigned first) and then randomly within same priority
+    // Sort images by priority (least assigned first) then randomly within same priority
     const sortByPriorityThenRandom = (images) => {
       return images.sort((a, b) => {
         if (b.priority === a.priority) {
           return Math.random() - 0.5; // Random within same priority
         }
-        return b.priority - a.priority; // Higher priority first
+        return b.priority - a.priority; // Higher priority first (fewer assignments)
       });
     };
     
@@ -177,50 +181,29 @@ const assignImagesBalanced = async (imagesPerUser = 10) => {
     const sortedSet2 = sortByPriorityThenRandom([...set2]);
     
     // Assign from set1 (prioritizing least-assigned)
-    let set1Assigned = 0;
-    const maxFromSet1 = Math.min(targetPerSet, sortedSet1.length);
-    for (let i = 0; i < maxFromSet1; i++) {
+    for (let i = 0; i < imagesPerSet; i++) {
       assignedImages.push(sortedSet1[i]);
-      set1Assigned++;
     }
     
     // Assign from set2 (prioritizing least-assigned)
-    let set2Assigned = 0;
-    const maxFromSet2 = Math.min(targetPerSet, sortedSet2.length);
-    for (let i = 0; i < maxFromSet2; i++) {
+    for (let i = 0; i < imagesPerSet; i++) {
       assignedImages.push(sortedSet2[i]);
-      set2Assigned++;
     }
     
-    // If we need more images to reach target, fill from whichever set has availability
-    const remainingNeeded = imagesPerUser - assignedImages.length;
-    if (remainingNeeded > 0) {
-      console.log(`Need ${remainingNeeded} more images, filling from available sets...`);
-      
-      // Try to fill from set1 first
-      for (let i = set1Assigned; i < sortedSet1.length && assignedImages.length < imagesPerUser; i++) {
-        assignedImages.push(sortedSet1[i]);
-      }
-      
-      // Then fill from set2 if still needed
-      for (let i = set2Assigned; i < sortedSet2.length && assignedImages.length < imagesPerUser; i++) {
-        assignedImages.push(sortedSet2[i]);
-      }
-    }
-    
-    // Final shuffle to randomize order for presentation
+    // Final shuffle to randomize order for presentation (mixed assignment)
     const shuffledAssigned = assignedImages.sort(() => Math.random() - 0.5);
     
-    console.log(`✓ Balanced assignment complete:`);
+    console.log(`✓ Mixed balanced assignment complete:`);
     console.log(`  - Total assigned: ${shuffledAssigned.length}`);
     console.log(`  - From Set1: ${shuffledAssigned.filter(img => img.set === 'set1').length}`);
     console.log(`  - From Set2: ${shuffledAssigned.filter(img => img.set === 'set2').length}`);
     console.log(`  - Assignment counts: ${shuffledAssigned.map(img => img.assignmentCount).join(', ')}`);
+    console.log(`  - Mixed order: ${shuffledAssigned.map(img => img.set).join(', ')}`);
     
     return shuffledAssigned;
     
   } catch (error) {
-    console.error('Error in balanced assignment:', error);
+    console.error('Error in mixed balanced assignment:', error);
     throw error;
   }
 };
@@ -249,22 +232,32 @@ const updateAssignmentCounts = async (assignedImages, userId) => {
     
     batch.update(trackingRef, updates);
     
-    // Also log the assignment
+    // Also log the assignment for tracking
     const assignmentLogRef = doc(db, 'assignmentLogs', `${userId}_${Date.now()}`);
     batch.set(assignmentLogRef, {
       userId,
       assignedImages: assignedImages.map(img => ({
         id: img.id,
         set: img.set,
-        previousCount: img.assignmentCount
+        previousCount: img.assignmentCount,
+        newCount: img.assignmentCount + 1
       })),
       assignmentTimestamp: serverTimestamp(),
-      totalImagesAssigned: assignedImages.length
+      totalImagesAssigned: assignedImages.length,
+      assignmentType: 'mixed_balanced_5_limit'
     });
     
     await batch.commit();
     
     console.log('✓ Assignment counts updated successfully');
+    
+    // Log if any images are approaching the limit
+    assignedImages.forEach(img => {
+      const newCount = img.assignmentCount + 1;
+      if (newCount >= 4) {
+        console.log(`⚠️ Image ${img.id} now assigned ${newCount}/5 times`);
+      }
+    });
     
   } catch (error) {
     console.error('Error updating assignment counts:', error);
@@ -272,19 +265,21 @@ const updateAssignmentCounts = async (assignedImages, userId) => {
   }
 };
 
-// Main function: Get balanced assignment and update counts
+// Main function: Get mixed balanced assignment and update counts
 export const getBalancedImageAssignment = async (userId, imagesPerUser = 10) => {
   try {
-    console.log(`=== Starting Balanced Image Assignment for ${userId} ===`);
+    console.log(`=== Starting Mixed Balanced Image Assignment for ${userId} ===`);
+    console.log(`Target: ${imagesPerUser} images (${imagesPerUser/2} from each set, mixed order)`);
     
-    // Get balanced assignment
+    // Get mixed balanced assignment (5 from each set, least-assigned first)
     const assignedImages = await assignImagesBalanced(imagesPerUser);
     
     // Update assignment counts
     await updateAssignmentCounts(assignedImages, userId);
     
     console.log(`=== Assignment Complete for ${userId} ===`);
-    console.log(`✓ Assigned ${assignedImages.length} images with balanced distribution`);
+    console.log(`✓ Assigned ${assignedImages.length} images with mixed balanced distribution`);
+    console.log(`✓ Assignment order: ${assignedImages.map(img => img.set).join(' → ')}`);
     
     return assignedImages;
     
@@ -319,6 +314,7 @@ export const getAssignmentStatistics = async () => {
       stats.total = counts.length;
       stats.fullyAssigned = counts.filter(count => count >= maxAssignments).length;
       stats.available = counts.filter(count => count < maxAssignments).length;
+      stats.nearLimit = counts.filter(count => count >= maxAssignments - 1).length; // 4+ assignments
       
       return stats;
     };
@@ -328,12 +324,54 @@ export const getAssignmentStatistics = async () => {
       set2: calculateSetStats(data.set2),
       totalAssignments: data.totalAssignments || 0,
       lastUpdated: data.lastUpdated,
-      maxAssignmentsPerImage: maxAssignments
+      maxAssignmentsPerImage: maxAssignments,
+      imagesPerUser: data.imagesPerUser || 10,
+      imagesPerSet: data.imagesPerSet || 5
     };
     
   } catch (error) {
     console.error('Error getting assignment statistics:', error);
     return null;
+  }
+};
+
+// Check if system can accommodate more users
+export const checkAssignmentCapacity = async () => {
+  try {
+    const stats = await getAssignmentStatistics();
+    if (!stats) return { canAssign: false, reason: 'No assignment data found' };
+    
+    const set1Available = stats.set1.available || 0;
+    const set2Available = stats.set2.available || 0;
+    const imagesPerSet = stats.imagesPerSet || 5;
+    
+    const canAssignSet1 = set1Available >= imagesPerSet;
+    const canAssignSet2 = set2Available >= imagesPerSet;
+    
+    if (canAssignSet1 && canAssignSet2) {
+      // Estimate how many more users can be assigned
+      const maxUsersSet1 = Math.floor(set1Available / imagesPerSet);
+      const maxUsersSet2 = Math.floor(set2Available / imagesPerSet);
+      const estimatedCapacity = Math.min(maxUsersSet1, maxUsersSet2);
+      
+      return {
+        canAssign: true,
+        estimatedCapacity,
+        set1Available,
+        set2Available,
+        message: `Can assign approximately ${estimatedCapacity} more users`
+      };
+    } else {
+      return {
+        canAssign: false,
+        reason: `Insufficient images available. Set1: ${set1Available}/${imagesPerSet}, Set2: ${set2Available}/${imagesPerSet}`,
+        set1Available,
+        set2Available
+      };
+    }
+  } catch (error) {
+    console.error('Error checking assignment capacity:', error);
+    return { canAssign: false, reason: 'Error checking capacity' };
   }
 };
 
@@ -348,7 +386,9 @@ export const resetAssignmentCounts = async () => {
       set2: {},
       totalAssignments: 0,
       lastUpdated: serverTimestamp(),
-      maxAssignmentsPerImage: 5,
+      maxAssignmentsPerImage: 5, // Keep the 5-assignment limit
+      imagesPerUser: 10,
+      imagesPerSet: 5,
       resetAt: serverTimestamp()
     };
     
@@ -363,7 +403,7 @@ export const resetAssignmentCounts = async () => {
     
     await setDoc(trackingRef, resetData);
     
-    console.log('✓ Assignment counts reset successfully');
+    console.log('✓ Assignment counts reset successfully with 5-assignment limit');
     
   } catch (error) {
     console.error('Error resetting assignment counts:', error);
